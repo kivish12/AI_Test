@@ -11,16 +11,23 @@ def get_claude_api_key():
 @frappe.whitelist()
 def save_settings(claude_api_key):
     try:
-        frappe.utils.set_site_config("claude_api_key", claude_api_key)
+        # Works on all Frappe versions
+        site_config = frappe.get_site_config()
+        site_config["claude_api_key"] = claude_api_key
+
+        import os, json
+        config_path = os.path.join(
+            frappe.utils.get_bench_path(),
+            "sites",
+            frappe.local.site,
+            "site_config.json"
+        )
+        with open(config_path, "w") as f:
+            json.dump(site_config, f, indent=2)
+
         return {"success": True}
     except Exception as e:
-        try:
-            from frappe.utils.site_config import update_site_config
-            update_site_config("claude_api_key", claude_api_key)
-            return {"success": True}
-        except Exception as e2:
-            return {"success": False, "error": str(e2)}
-
+        return {"success": False, "error": str(e)}
 
 @frappe.whitelist()
 def get_settings():
