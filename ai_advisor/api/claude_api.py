@@ -63,7 +63,7 @@ def get_business_snapshot():
             ORDER BY outstanding_amount DESC LIMIT 50
         """, as_dict=True)
 
-        overdue = [r for r in receivables if r.get("due_date") and str(r["due_date"]) < today]
+        overdue = [r for r in receivables if r.get("due_date") and r["due_date"] < today_date]
         total_receivables = sum(float(r["outstanding_amount"] or 0) for r in receivables)
         total_overdue = sum(float(r["outstanding_amount"] or 0) for r in overdue)
 
@@ -88,7 +88,7 @@ def get_business_snapshot():
             LEFT JOIN `tabGL Entry` gl ON gl.account = a.name AND gl.is_cancelled = 0
             WHERE a.account_type IN ('Bank', 'Cash') AND a.is_group = 0
             GROUP BY a.name, a.account_name, a.account_currency
-            ORDER BY balance DESC
+            ORDER BY SUM(gl.debit - gl.credit) DESC
         """, as_dict=True)
         total_bank_balance = sum(float(b["balance"] or 0) for b in bank_accounts)
 
@@ -101,8 +101,8 @@ def get_business_snapshot():
             WHERE a.is_group = 0
               AND a.root_type IN ('Asset', 'Liability', 'Income', 'Expense')
             GROUP BY a.name, a.account_name, a.root_type, a.account_type
-            HAVING ABS(balance) > 0
-            ORDER BY a.root_type, ABS(balance) DESC
+            HAVING ABS(SUM(gl.debit - gl.credit)) > 0
+            ORDER BY a.root_type, ABS(SUM(gl.debit - gl.credit)) DESC
         """, as_dict=True)
 
         coa_summary = {}
