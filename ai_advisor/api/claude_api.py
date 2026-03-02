@@ -76,7 +76,7 @@ def get_business_snapshot():
         low_stock = frappe.db.sql("""
             SELECT 
                 b.item_code,
-                b.item_name,
+                i.item_name,
                 b.actual_qty,
                 i.reorder_level,
                 i.stock_uom
