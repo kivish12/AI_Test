@@ -1,0 +1,63 @@
+{
+ "actions": [],
+ "creation": "2026-03-01 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "claude_api_key",
+  "model",
+  "max_tokens"
+ ],
+ "fields": [
+  {
+   "fieldname": "claude_api_key",
+   "fieldtype": "Password",
+   "in_list_view": 0,
+   "label": "Claude API Key",
+   "reqd": 1,
+   "description": "Get your API key from https://console.anthropic.com"
+  },
+  {
+   "fieldname": "model",
+   "fieldtype": "Select",
+   "label": "Claude Model",
+   "options": "claude-sonnet-4-20250514\nclaude-haiku-4-5-20251001\nclaude-opus-4-6",
+   "default": "claude-sonnet-4-20250514",
+   "description": "Sonnet is recommended - best balance of speed and intelligence"
+  },
+  {
+   "fieldname": "max_tokens",
+   "fieldtype": "Int",
+   "label": "Max Tokens per Response",
+   "default": "1024",
+   "description": "Higher = longer responses but more API cost"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-03-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "AI Advisor",
+ "name": "AI Advisor Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 0,
+   "export": 0,
+   "print": 0,
+   "read": 1,
+   "report": 0,
+   "role": "System Manager",
+   "share": 0,
+   "submit": 0,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

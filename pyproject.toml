@@ -1,0 +1,25 @@
+[project]
+name = "ai_advisor"
+authors = [
+    { name = "Your Company", email = "admin@yourcompany.com" }
+]
+description = "Claude AI Business Advisor Dashboard for ERPNext"
+requires-python = ">=3.10"
+readme = "README.md"
+dynamic = ["version"]
+dependencies = [
+    "frappe",
+    "requests"
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/ai_advisor"
+
+[build-system]
+requires = ["flit_core >=3.4.0,<4"]
+build-backend = "flit_core.buildapi"
+
+[tool.flit.module]
+name = "ai_advisor"
+
+[tool.bench.dev-dependencies]
