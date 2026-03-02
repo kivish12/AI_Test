@@ -40,6 +40,12 @@ def get_business_snapshot():
         month_start = datetime.today().replace(day=1).strftime("%Y-%m-%d")
         week_end = (today_date + timedelta(days=7)).strftime("%Y-%m-%d")
         month_end = (today_date + timedelta(days=30)).strftime("%Y-%m-%d")
+        current_month = datetime.today().month
+        current_year = datetime.today().year
+        next_month = current_month + 1 if current_month < 12 else 1
+        next_month_year_offset = 0 if current_month < 12 else 1
+        ninety_days_ago = (today_date - timedelta(days=90)).strftime("%Y-%m-%d")
+        one_eighty_days_ago = (today_date - timedelta(days=180)).strftime("%Y-%m-%d")
 
         # ── RECEIVABLES ──────────────────────────────────────────────────────
         receivables = frappe.db.sql("""
@@ -114,6 +120,17 @@ def get_business_snapshot():
         """, (month_start,), as_dict=True)
         mtd_total = float(mtd[0]["total"]) if mtd else 0
 
+        # ── SALES TREND (6 months) ────────────────────────────────────────────
+        sales_trend = frappe.db.sql("""
+            SELECT DATE_FORMAT(posting_date,'%%Y-%%m') as month,
+                   SUM(grand_total) as amount, COUNT(*) as count
+            FROM `tabSales Invoice`
+            WHERE docstatus = 1
+              AND posting_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+            GROUP BY DATE_FORMAT(posting_date,'%%Y-%%m')
+            ORDER BY month ASC
+        """, as_dict=True)
+
         # ── SALES BY TERRITORY ────────────────────────────────────────────────
         sales_by_territory = frappe.db.sql("""
             SELECT territory,
@@ -128,7 +145,18 @@ def get_business_snapshot():
             ORDER BY revenue DESC
         """, as_dict=True)
 
-        # ── SALES BY ITEM (fast vs slow movers) ───────────────────────────────
+        # ── TOP CUSTOMERS ─────────────────────────────────────────────────────
+        top_customers = frappe.db.sql("""
+            SELECT customer, customer_group, territory,
+                   SUM(grand_total) as revenue, COUNT(*) as orders
+            FROM `tabSales Invoice`
+            WHERE docstatus = 1
+              AND posting_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+            GROUP BY customer, customer_group, territory
+            ORDER BY revenue DESC LIMIT 15
+        """, as_dict=True)
+
+        # ── ITEM SALES — FAST / SLOW / DEAD MOVERS ───────────────────────────
         item_sales = frappe.db.sql("""
             SELECT
                 sii.item_code,
@@ -142,17 +170,10 @@ def get_business_snapshot():
             WHERE si.docstatus = 1
               AND si.posting_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
             GROUP BY sii.item_code, sii.item_name
-            ORDER BY revenue DESC
-            LIMIT 50
+            ORDER BY revenue DESC LIMIT 100
         """, as_dict=True)
 
-        # Classify fast vs slow movers
-        fast_movers = []
-        slow_movers = []
-        dead_stock = []
-        ninety_days_ago = (today_date - timedelta(days=90)).strftime("%Y-%m-%d")
-        one_eighty_days_ago = (today_date - timedelta(days=180)).strftime("%Y-%m-%d")
-
+        fast_movers, slow_movers, dead_stock = [], [], []
         for item in item_sales:
             last_sold = str(item.get("last_sold_date", ""))
             if last_sold >= ninety_days_ago:
@@ -196,29 +217,7 @@ def get_business_snapshot():
         except Exception:
             low_stock = []
 
-        # ── SALES TREND ───────────────────────────────────────────────────────
-        sales_trend = frappe.db.sql("""
-            SELECT DATE_FORMAT(posting_date,'%%Y-%%m') as month,
-                   SUM(grand_total) as amount, COUNT(*) as count
-            FROM `tabSales Invoice`
-            WHERE docstatus = 1
-              AND posting_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
-            GROUP BY DATE_FORMAT(posting_date,'%%Y-%%m')
-            ORDER BY month ASC
-        """, as_dict=True)
-
-        # ── TOP CUSTOMERS ─────────────────────────────────────────────────────
-        top_customers = frappe.db.sql("""
-            SELECT customer, customer_group, territory,
-                   SUM(grand_total) as revenue, COUNT(*) as orders
-            FROM `tabSales Invoice`
-            WHERE docstatus = 1
-              AND posting_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-            GROUP BY customer, customer_group, territory
-            ORDER BY revenue DESC LIMIT 15
-        """, as_dict=True)
-
-        # ── PURCHASE HISTORY (what we buy and from whom) ──────────────────────
+        # ── PURCHASE HISTORY ──────────────────────────────────────────────────
         purchase_history = frappe.db.sql("""
             SELECT pii.item_code, pii.item_name, pii.supplier,
                    SUM(pii.qty) as qty_purchased,
@@ -229,9 +228,156 @@ def get_business_snapshot():
             WHERE pi.docstatus = 1
               AND pi.posting_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
             GROUP BY pii.item_code, pii.item_name, pii.supplier
-            ORDER BY qty_purchased DESC
-            LIMIT 30
+            ORDER BY qty_purchased DESC LIMIT 30
         """, as_dict=True)
+
+        # ── SEASONAL FORECAST — SAME MONTH LAST 2 YEARS (SALES) ──────────────
+        seasonal_sales = frappe.db.sql("""
+            SELECT
+                sii.item_code,
+                sii.item_name,
+                YEAR(si.posting_date) as year,
+                MONTH(si.posting_date) as month,
+                SUM(sii.qty) as qty_sold,
+                SUM(sii.amount) as revenue,
+                AVG(sii.rate) as avg_rate
+            FROM `tabSales Invoice Item` sii
+            JOIN `tabSales Invoice` si ON si.name = sii.parent
+            WHERE si.docstatus = 1
+              AND MONTH(si.posting_date) = %s
+              AND YEAR(si.posting_date) IN (%s, %s)
+            GROUP BY sii.item_code, sii.item_name,
+                     YEAR(si.posting_date), MONTH(si.posting_date)
+            ORDER BY sii.item_code, year DESC
+        """, (current_month, current_year - 1, current_year - 2), as_dict=True)
+
+        # ── SEASONAL FORECAST — NEXT MONTH LAST 2 YEARS (ORDER AHEAD) ────────
+        seasonal_next_month = frappe.db.sql("""
+            SELECT
+                sii.item_code,
+                sii.item_name,
+                YEAR(si.posting_date) as year,
+                MONTH(si.posting_date) as month,
+                SUM(sii.qty) as qty_sold,
+                SUM(sii.amount) as revenue,
+                AVG(sii.rate) as avg_rate
+            FROM `tabSales Invoice Item` sii
+            JOIN `tabSales Invoice` si ON si.name = sii.parent
+            WHERE si.docstatus = 1
+              AND MONTH(si.posting_date) = %s
+              AND YEAR(si.posting_date) IN (%s, %s)
+            GROUP BY sii.item_code, sii.item_name,
+                     YEAR(si.posting_date), MONTH(si.posting_date)
+            ORDER BY sii.item_code, year DESC
+        """, (
+            next_month,
+            current_year - 1 - next_month_year_offset,
+            current_year - 2 - next_month_year_offset
+        ), as_dict=True)
+
+        # ── SEASONAL FORECAST — SAME MONTH LAST 2 YEARS (PURCHASES) ─────────
+        seasonal_purchases = frappe.db.sql("""
+            SELECT
+                pii.item_code,
+                pii.item_name,
+                pii.supplier,
+                YEAR(pi.posting_date) as year,
+                MONTH(pi.posting_date) as month,
+                SUM(pii.qty) as qty_purchased,
+                AVG(pii.rate) as avg_rate
+            FROM `tabPurchase Invoice Item` pii
+            JOIN `tabPurchase Invoice` pi ON pi.name = pii.parent
+            WHERE pi.docstatus = 1
+              AND MONTH(pi.posting_date) = %s
+              AND YEAR(pi.posting_date) IN (%s, %s)
+            GROUP BY pii.item_code, pii.item_name, pii.supplier,
+                     YEAR(pi.posting_date), MONTH(pi.posting_date)
+            ORDER BY pii.item_code, year DESC
+        """, (current_month, current_year - 1, current_year - 2), as_dict=True)
+
+        # ── BUILD FORECAST PER ITEM ───────────────────────────────────────────
+        # Average of last 2 years same month = expected this month
+        forecast = {}
+        for row in seasonal_sales:
+            key = row["item_code"]
+            if key not in forecast:
+                forecast[key] = {
+                    "item_code": row["item_code"],
+                    "item_name": row["item_name"],
+                    "historical_data": [],
+                    "avg_qty_forecast": 0,
+                    "avg_revenue_forecast": 0,
+                    "avg_rate": 0
+                }
+            forecast[key]["historical_data"].append({
+                "year": row["year"],
+                "qty_sold": float(row["qty_sold"] or 0),
+                "revenue": float(row["revenue"] or 0),
+                "avg_rate": float(row["avg_rate"] or 0)
+            })
+
+        # Calculate averages and recommended order qty
+        stock_lookup = {s["item_code"]: float(s["available_qty"] or 0) for s in current_stock}
+        for key in forecast:
+            h = forecast[key]["historical_data"]
+            if h:
+                avg_qty = sum(y["qty_sold"] for y in h) / len(h)
+                avg_rev = sum(y["revenue"] for y in h) / len(h)
+                avg_rate = sum(y["avg_rate"] for y in h) / len(h)
+                forecast[key]["avg_qty_forecast"] = round(avg_qty, 1)
+                forecast[key]["avg_revenue_forecast"] = round(avg_rev, 0)
+                forecast[key]["avg_rate"] = round(avg_rate, 2)
+                # Recommended order = forecast minus what we already have
+                current_qty = stock_lookup.get(key, 0)
+                shortfall = avg_qty - current_qty
+                forecast[key]["current_stock"] = current_qty
+                forecast[key]["recommended_order_qty"] = round(max(shortfall, 0), 1)
+                forecast[key]["stock_covers_forecast"] = current_qty >= avg_qty
+
+        forecast_list = sorted(
+            forecast.values(),
+            key=lambda x: x["avg_revenue_forecast"],
+            reverse=True
+        )
+
+        # Next month forecast list
+        next_month_forecast = {}
+        for row in seasonal_next_month:
+            key = row["item_code"]
+            if key not in next_month_forecast:
+                next_month_forecast[key] = {
+                    "item_code": row["item_code"],
+                    "item_name": row["item_name"],
+                    "historical_data": [],
+                    "avg_qty_forecast": 0,
+                    "avg_revenue_forecast": 0,
+                }
+            next_month_forecast[key]["historical_data"].append({
+                "year": row["year"],
+                "qty_sold": float(row["qty_sold"] or 0),
+                "revenue": float(row["revenue"] or 0)
+            })
+
+        for key in next_month_forecast:
+            h = next_month_forecast[key]["historical_data"]
+            if h:
+                next_month_forecast[key]["avg_qty_forecast"] = round(
+                    sum(y["qty_sold"] for y in h) / len(h), 1
+                )
+                next_month_forecast[key]["avg_revenue_forecast"] = round(
+                    sum(y["revenue"] for y in h) / len(h), 0
+                )
+                current_qty = stock_lookup.get(key, 0)
+                next_month_forecast[key]["current_stock"] = current_qty
+                next_month_forecast[key]["order_now_for_next_month"] = round(
+                    max(next_month_forecast[key]["avg_qty_forecast"] - current_qty, 0), 1
+                )
+
+        next_month_forecast_list = sorted(
+            next_month_forecast.values(),
+            key=lambda x: x["avg_revenue_forecast"],
+            reverse=True
+        )
 
         # ── RECENT PAYMENTS ───────────────────────────────────────────────────
         recent_receipts = frappe.db.sql("""
@@ -254,6 +400,8 @@ def get_business_snapshot():
 
         return {
             "success": True,
+
+            # ── KPI SUMMARY ──────────────────────────────────────────────────
             "kpis": {
                 "total_bank_balance": total_bank_balance,
                 "total_receivables": total_receivables,
@@ -268,7 +416,11 @@ def get_business_snapshot():
                 "open_invoices": len(receivables),
                 "net_cash_after_week_dues": total_bank_balance - due_this_week_total,
                 "net_cash_after_30day_dues": total_bank_balance - due_next_30_total,
+                "can_cover_week_dues": total_bank_balance >= due_this_week_total,
+                "can_cover_30day_dues": total_bank_balance >= due_next_30_total,
             },
+
+            # ── FINANCIAL POSITION ────────────────────────────────────────────
             "bank_accounts": [
                 {
                     "account": b["account_name"],
@@ -277,6 +429,8 @@ def get_business_snapshot():
                 } for b in bank_accounts
             ],
             "chart_of_accounts": coa_summary,
+
+            # ── RECEIVABLES ───────────────────────────────────────────────────
             "overdue_customers": [
                 {
                     "customer": r["customer"],
@@ -287,6 +441,8 @@ def get_business_snapshot():
                     "territory": r.get("territory")
                 } for r in overdue[:20]
             ],
+
+            # ── PAYABLES & PAYMENT SCHEDULING ────────────────────────────────
             "all_payables": [
                 {
                     "supplier": p["supplier"],
@@ -305,6 +461,8 @@ def get_business_snapshot():
                     "invoice": p["name"]
                 } for p in due_this_week
             ],
+
+            # ── SALES PERFORMANCE ─────────────────────────────────────────────
             "sales_trend": [
                 {"month": s["month"], "amount": float(s["amount"] or 0), "count": s["count"]}
                 for s in sales_trend
@@ -326,6 +484,8 @@ def get_business_snapshot():
                     "group": c.get("customer_group")
                 } for c in top_customers
             ],
+
+            # ── INVENTORY INTELLIGENCE ────────────────────────────────────────
             "fast_moving_items": [
                 {
                     "item": i["item_code"],
@@ -384,6 +544,57 @@ def get_business_snapshot():
                     "last_purchased": str(p["last_purchased"])
                 } for p in purchase_history
             ],
+
+            # ── SEASONAL FORECASTING ──────────────────────────────────────────
+            "seasonal_forecast_this_month": {
+                "month_name": datetime.today().strftime("%B %Y"),
+                "based_on": [current_year - 1, current_year - 2],
+                "note": f"Expected sales this month based on {current_year-1} and {current_year-2} same month",
+                "items": [
+                    {
+                        "item_code": f["item_code"],
+                        "item_name": f["item_name"],
+                        "historical_data": f["historical_data"],
+                        "avg_qty_forecast": f["avg_qty_forecast"],
+                        "avg_revenue_forecast": f["avg_revenue_forecast"],
+                        "avg_selling_rate": f["avg_rate"],
+                        "current_stock": f["current_stock"],
+                        "recommended_order_qty": f["recommended_order_qty"],
+                        "stock_covers_forecast": f["stock_covers_forecast"],
+                        "urgent": not f["stock_covers_forecast"]
+                    } for f in forecast_list[:30]
+                ]
+            },
+            "seasonal_forecast_next_month": {
+                "month_name": (datetime.today().replace(day=1) + timedelta(days=32)).strftime("%B %Y"),
+                "note": "Order NOW to be ready for next month based on historical data",
+                "items": [
+                    {
+                        "item_code": f["item_code"],
+                        "item_name": f["item_name"],
+                        "historical_data": f["historical_data"],
+                        "avg_qty_forecast": f["avg_qty_forecast"],
+                        "avg_revenue_forecast": f["avg_revenue_forecast"],
+                        "current_stock": f["current_stock"],
+                        "order_now_for_next_month": f["order_now_for_next_month"]
+                    } for f in next_month_forecast_list[:30]
+                ]
+            },
+            "seasonal_purchases_this_month": {
+                "note": f"What was purchased this month in {current_year-1} and {current_year-2}",
+                "items": [
+                    {
+                        "item": r["item_code"],
+                        "name": r["item_name"],
+                        "supplier": r["supplier"],
+                        "qty_purchased": float(r["qty_purchased"] or 0),
+                        "avg_rate": float(r["avg_rate"] or 0),
+                        "year": r["year"]
+                    } for r in seasonal_purchases[:30]
+                ]
+            },
+
+            # ── RECENT PAYMENTS ───────────────────────────────────────────────
             "recent_receipts_30d": [
                 {
                     "customer": r["customer"],
@@ -423,44 +634,71 @@ def ask_claude(question, context_data=None):
 
     system_prompt = """You are an embedded AI CFO and operations advisor inside ERPNext for a Kenyan SME.
 
-You have access to LIVE data including:
-- Bank balances per account
+You have access to LIVE real-time data from their ERP including:
+
+FINANCIAL:
+- Bank balances per account with exact KES amounts
 - Full chart of accounts (assets, liabilities, income, expenses)
-- Outstanding receivables with customer names, amounts, days overdue, territory
-- All payables with due dates — this week and next 30 days
-- Net cash position after paying dues
-- Sales performance by territory and customer
-- Fast moving, slow moving, and dead stock items
+- Outstanding receivables — who owes money, how much, how many days overdue, their territory
+- All payables — who to pay, exact amounts, due dates, days until due
+- Which payables are due this week and next 30 days
+- Net cash position after paying all dues
+- Whether current bank balance can cover upcoming obligations
+- Recent payments received and made (last 30 days)
+
+INVENTORY & PURCHASING:
 - Current stock levels with values
-- Reorder alerts with suggested quantities
-- Purchase history per item and supplier
-- Recent payments in and out
+- Fast moving items (sold in last 90 days)
+- Slow moving items (not sold in 90-180 days) — candidates for discounting
+- Dead stock (not sold in 180+ days) — stop reordering these
+- Items below reorder level with suggested reorder quantities
+- Full purchase history — what was bought, from whom, at what price
 
-YOU ARE A REAL CFO. Give advice on:
-
-CASH MANAGEMENT:
-- Exact cheque amounts and which supplier to pay first
-- How much cash to keep in reserve based on upcoming obligations
-- Whether they can afford all dues or need to prioritize
-- Which receivables to collect urgently to cover payment gaps
-
-INVENTORY:
-- Which items to reorder urgently and in what quantity
-- Which slow movers to discount and by how much to clear stock
-- Which dead stock to stop reordering entirely
-- Optimal order quantities based on sales velocity
+SEASONAL FORECASTING:
+- Expected sales THIS MONTH based on same month in the last 2 years
+- For each item: historical qty sold, average forecast, current stock, recommended order qty
+- Expected sales NEXT MONTH based on historical data — so they can order ahead NOW
+- What was purchased same month last 2 years (purchase seasonality)
+- Items flagged URGENT = current stock won't cover this month's expected demand
 
 SALES & TERRITORY:
-- Which territories are performing and which need focus
-- Which customer segments to prioritize
-- Which routes/areas have the best return
+- Sales by territory — which routes/regions are performing
+- Top customers with territory and segment
+- 6-month sales trend
 
-RESPONSE RULES:
+YOUR ROLE — Act as a real CFO and operations manager:
+
+CASH & PAYMENTS:
+- Tell them exactly which cheques to write today and for how much
+- Prioritize payments if cash is tight (pay overdue first, then by amount)
+- Calculate how much cash to keep in reserve after paying dues
+- Flag if bank balance cannot cover dues — tell them which receivables to collect urgently
+- Give specific payment schedule: Supplier X — KES Y — by Date Z
+
+INVENTORY ORDERS:
+- Use seasonal forecast to tell them EXACTLY what to order and how much
+- Formula: Recommended order = Avg forecast qty minus current stock
+- Flag items where stock will run out before month end based on forecast
+- Tell them what NOT to order (dead stock, overstocked slow movers)
+- Suggest discount % for slow movers to clear stock
+
+SALES STRATEGY:
+- Which territories to focus on based on revenue data
+- Which customer segments to prioritize
+- Which routes are underperforming and why
+
+RESPONSE FORMAT:
+1. Direct answer with specific numbers
+2. Priority action list (numbered, specific names and amounts)
+3. Cash flow position summary
+4. Warnings if anything is critical
+
+RULES:
 - Always use exact KES amounts from the data
-- Name specific suppliers, customers, items, territories
-- Give numbered action lists
-- Warn if cash position is tight
-- Be a real advisor — direct, specific, no filler"""
+- Always name specific suppliers, customers, items, territories
+- Never give generic advice — everything must reference actual data
+- If data shows a gap, say so clearly
+- Be a real CFO — decisive, specific, actionable"""
 
     user_message = (
         f"{question}\n\n"
