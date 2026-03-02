@@ -73,7 +73,17 @@ def get_business_snapshot():
         """, as_dict=True)
 
         # Low stock items (items below reorder level)
-        low_stock = []
+        low_stock = frappe.db.sql("""
+            SELECT b.item_code, i.item_name, b.actual_qty,
+                   ir.warehouse_reorder_level as reorder_level, i.stock_uom
+            FROM `tabBin` b
+            JOIN `tabItem` i ON i.name = b.item_code
+            JOIN `tabItem Reorder` ir ON ir.parent = b.item_code
+            WHERE b.actual_qty <= ir.warehouse_reorder_level
+              AND ir.warehouse_reorder_level > 0
+            ORDER BY (b.actual_qty / NULLIF(ir.warehouse_reorder_level, 0)) ASC
+            LIMIT 20
+        """, as_dict=True)
 
         return {
             "success": True,
