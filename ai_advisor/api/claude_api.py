@@ -11,10 +11,6 @@ def get_claude_api_key():
 @frappe.whitelist()
 def save_settings(claude_api_key):
     try:
-        # Works on all Frappe versions
-        site_config = frappe.get_site_config()
-        site_config["claude_api_key"] = claude_api_key
-
         import os, json
         config_path = os.path.join(
             frappe.utils.get_bench_path(),
@@ -22,12 +18,18 @@ def save_settings(claude_api_key):
             frappe.local.site,
             "site_config.json"
         )
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                site_config = json.load(f)
+        else:
+            site_config = {}
+        site_config["claude_api_key"] = claude_api_key
         with open(config_path, "w") as f:
             json.dump(site_config, f, indent=2)
-
         return {"success": True}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
 
 @frappe.whitelist()
 def get_settings():
@@ -63,7 +65,7 @@ def get_business_snapshot():
             ORDER BY outstanding_amount DESC LIMIT 50
         """, as_dict=True)
 
-        overdue = [r for r in receivables if r.get("due_date") and r["due_date"] < today_date]
+        overdue = [r for r in receivables if r.get("due_date") and str(r["due_date"]) < today]
         total_receivables = sum(float(r["outstanding_amount"] or 0) for r in receivables)
         total_overdue = sum(float(r["outstanding_amount"] or 0) for r in overdue)
 
@@ -88,7 +90,7 @@ def get_business_snapshot():
             LEFT JOIN `tabGL Entry` gl ON gl.account = a.name AND gl.is_cancelled = 0
             WHERE a.account_type IN ('Bank', 'Cash') AND a.is_group = 0
             GROUP BY a.name, a.account_name, a.account_currency
-            ORDER BY SUM(gl.debit - gl.credit) DESC
+            ORDER BY balance DESC
         """, as_dict=True)
         total_bank_balance = sum(float(b["balance"] or 0) for b in bank_accounts)
 
@@ -101,8 +103,8 @@ def get_business_snapshot():
             WHERE a.is_group = 0
               AND a.root_type IN ('Asset', 'Liability', 'Income', 'Expense')
             GROUP BY a.name, a.account_name, a.root_type, a.account_type
-            HAVING ABS(SUM(gl.debit - gl.credit)) > 0
-            ORDER BY a.root_type, ABS(SUM(gl.debit - gl.credit)) DESC
+            HAVING ABS(balance) > 0
+            ORDER BY a.root_type, ABS(balance) DESC
         """, as_dict=True)
 
         coa_summary = {}
@@ -196,7 +198,7 @@ def get_business_snapshot():
                    b.actual_qty, b.reserved_qty,
                    (b.actual_qty - b.reserved_qty) as available_qty,
                    i.stock_uom,
-                   i.standard_selling_rate as selling_price,
+                   i.standard_rate as selling_price,
                    i.valuation_rate as cost_price
             FROM `tabBin` b
             JOIN `tabItem` i ON i.name = b.item_code
@@ -212,7 +214,7 @@ def get_business_snapshot():
                        ir.warehouse_reorder_level as reorder_level,
                        ir.warehouse_reorder_qty as reorder_qty,
                        i.stock_uom,
-                       i.standard_buying_price as buying_price
+                       i.last_purchase_rate as buying_price
                 FROM `tabBin` b
                 JOIN `tabItem` i ON i.name = b.item_code
                 JOIN `tabItem Reorder` ir ON ir.parent = b.item_code
