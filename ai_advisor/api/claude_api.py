@@ -1,7 +1,21 @@
 import frappe
 import requests
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
+
+
+def _to_date(val):
+    """Safely coerce a value to a Python date object, or return None."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date_type):
+        return val
+    try:
+        return datetime.strptime(str(val)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
 
 
 def get_claude_api_key():
@@ -44,13 +58,13 @@ def get_settings():
 @frappe.whitelist()
 def get_business_snapshot():
     try:
-        today = datetime.today().strftime("%Y-%m-%d")
         today_date = datetime.today().date()
-        month_start = datetime.today().replace(day=1).strftime("%Y-%m-%d")
+        today = today_date.strftime("%Y-%m-%d")
+        month_start = today_date.replace(day=1).strftime("%Y-%m-%d")
         week_end = (today_date + timedelta(days=7)).strftime("%Y-%m-%d")
         month_end = (today_date + timedelta(days=30)).strftime("%Y-%m-%d")
-        current_month = datetime.today().month
-        current_year = datetime.today().year
+        current_month = today_date.month
+        current_year = today_date.year
         next_month = current_month + 1 if current_month < 12 else 1
         next_month_year_offset = 0 if current_month < 12 else 1
         ninety_days_ago = (today_date - timedelta(days=90)).strftime("%Y-%m-%d")
@@ -65,7 +79,11 @@ def get_business_snapshot():
             ORDER BY outstanding_amount DESC LIMIT 50
         """, as_dict=True)
 
-        overdue = [r for r in receivables if r.get("due_date") and str(r["due_date"]) < today]
+        # FIX: coerce due_date to date before comparisons
+        for r in receivables:
+            r["due_date"] = _to_date(r.get("due_date"))
+
+        overdue = [r for r in receivables if r["due_date"] and r["due_date"] < today_date]
         total_receivables = sum(float(r["outstanding_amount"] or 0) for r in receivables)
         total_overdue = sum(float(r["outstanding_amount"] or 0) for r in overdue)
 
@@ -76,11 +94,55 @@ def get_business_snapshot():
             WHERE docstatus = 1 AND outstanding_amount > 0
             ORDER BY due_date ASC LIMIT 50
         """, as_dict=True)
+
+        # FIX: coerce due_date to date before comparisons
+        for p in payables:
+            p["due_date"] = _to_date(p.get("due_date"))
+
         total_payables = sum(float(p["outstanding_amount"] or 0) for p in payables)
-        due_this_week = [p for p in payables if p.get("due_date") and str(p["due_date"]) <= week_end]
-        due_next_30 = [p for p in payables if p.get("due_date") and str(p["due_date"]) <= month_end]
+        # Include no-due-date rows in week/30-day lists (treat as due immediately)
+        due_this_week = [p for p in payables if not p["due_date"] or p["due_date"] <= (today_date + timedelta(days=7))]
+        due_next_30 = [p for p in payables if not p["due_date"] or p["due_date"] <= (today_date + timedelta(days=30))]
         due_this_week_total = sum(float(p["outstanding_amount"] or 0) for p in due_this_week)
         due_next_30_total = sum(float(p["outstanding_amount"] or 0) for p in due_next_30)
+
+        # ── SUPPLIERS TO PAY — grouped by supplier, sorted by urgency ────────
+        supplier_totals = {}
+        for p in payables:
+            s = p["supplier"]
+            if s not in supplier_totals:
+                supplier_totals[s] = {
+                    "supplier": s,
+                    "total_outstanding": 0.0,
+                    "invoice_count": 0,
+                    "earliest_due": None,
+                    "has_overdue": False,
+                    "invoices": []
+                }
+            amt = float(p["outstanding_amount"] or 0)
+            supplier_totals[s]["total_outstanding"] += amt
+            supplier_totals[s]["invoice_count"] += 1
+            if p["due_date"]:
+                if supplier_totals[s]["earliest_due"] is None or p["due_date"] < supplier_totals[s]["earliest_due"]:
+                    supplier_totals[s]["earliest_due"] = p["due_date"]
+                if p["due_date"] < today_date:
+                    supplier_totals[s]["has_overdue"] = True
+            else:
+                # No due date — treat as immediately due
+                supplier_totals[s]["has_overdue"] = True
+            supplier_totals[s]["invoices"].append({
+                "invoice": p["name"],
+                "amount": amt,
+                "due_date": str(p["due_date"]) if p["due_date"] else "No due date",
+                "overdue": bool(not p["due_date"] or p["due_date"] < today_date)
+            })
+
+        suppliers_to_pay = sorted(
+            supplier_totals.values(),
+            key=lambda x: (not x["has_overdue"], x["earliest_due"] or today_date, -x["total_outstanding"])
+        )
+        for s in suppliers_to_pay:
+            s["earliest_due"] = str(s["earliest_due"]) if s["earliest_due"] else "No due date"
 
         # ── BANK & CASH BALANCES ──────────────────────────────────────────────
         bank_accounts = frappe.db.sql("""
@@ -184,7 +246,7 @@ def get_business_snapshot():
 
         fast_movers, slow_movers, dead_stock = [], [], []
         for item in item_sales:
-            last_sold = str(item.get("last_sold_date", ""))
+            last_sold = str(item.get("last_sold_date", "") or "")
             if last_sold >= ninety_days_ago:
                 fast_movers.append(item)
             elif last_sold >= one_eighty_days_ago:
@@ -208,17 +270,26 @@ def get_business_snapshot():
         """, as_dict=True)
 
         # ── LOW STOCK / REORDER ───────────────────────────────────────────────
+        # FIX: join on BOTH item_code AND warehouse so per-warehouse reorder
+        #      levels are matched correctly against the right bin row.
         try:
             low_stock = frappe.db.sql("""
-                SELECT b.item_code, i.item_name, b.actual_qty,
-                       ir.warehouse_reorder_level as reorder_level,
-                       ir.warehouse_reorder_qty as reorder_qty,
-                       i.stock_uom,
-                       i.last_purchase_rate as buying_price
+                SELECT
+                    b.item_code,
+                    i.item_name,
+                    b.warehouse,
+                    b.actual_qty,
+                    ir.warehouse_reorder_level  AS reorder_level,
+                    ir.warehouse_reorder_qty    AS reorder_qty,
+                    i.stock_uom,
+                    i.last_purchase_rate        AS buying_price
                 FROM `tabBin` b
-                JOIN `tabItem` i ON i.name = b.item_code
-                JOIN `tabItem Reorder` ir ON ir.parent = b.item_code
-                WHERE b.actual_qty <= ir.warehouse_reorder_level
+                JOIN `tabItem` i
+                    ON i.name = b.item_code
+                JOIN `tabItem Reorder` ir
+                    ON  ir.parent    = b.item_code
+                    AND ir.warehouse = b.warehouse
+                WHERE b.actual_qty          <= ir.warehouse_reorder_level
                   AND ir.warehouse_reorder_level > 0
                 ORDER BY (b.actual_qty / NULLIF(ir.warehouse_reorder_level, 0)) ASC
                 LIMIT 20
@@ -305,7 +376,6 @@ def get_business_snapshot():
         """, (current_month, current_year - 1, current_year - 2), as_dict=True)
 
         # ── BUILD FORECAST PER ITEM ───────────────────────────────────────────
-        # Average of last 2 years same month = expected this month
         forecast = {}
         for row in seasonal_sales:
             key = row["item_code"]
@@ -325,7 +395,6 @@ def get_business_snapshot():
                 "avg_rate": float(row["avg_rate"] or 0)
             })
 
-        # Calculate averages and recommended order qty
         stock_lookup = {s["item_code"]: float(s["available_qty"] or 0) for s in current_stock}
         for key in forecast:
             h = forecast[key]["historical_data"]
@@ -336,7 +405,6 @@ def get_business_snapshot():
                 forecast[key]["avg_qty_forecast"] = round(avg_qty, 1)
                 forecast[key]["avg_revenue_forecast"] = round(avg_rev, 0)
                 forecast[key]["avg_rate"] = round(avg_rate, 2)
-                # Recommended order = forecast minus what we already have
                 current_qty = stock_lookup.get(key, 0)
                 shortfall = avg_qty - current_qty
                 forecast[key]["current_stock"] = current_qty
@@ -349,7 +417,6 @@ def get_business_snapshot():
             reverse=True
         )
 
-        # Next month forecast list
         next_month_forecast = {}
         for row in seasonal_next_month:
             key = row["item_code"]
@@ -446,20 +513,33 @@ def get_business_snapshot():
                     "invoice": r["name"],
                     "amount": float(r["outstanding_amount"] or 0),
                     "due_date": str(r["due_date"]),
-                    "days_overdue": (today_date - r["due_date"]).days if r.get("due_date") else 0,
+                    # FIX: safe date arithmetic now that due_date is always a date object
+                    "days_overdue": (today_date - r["due_date"]).days if r["due_date"] else 0,
                     "territory": r.get("territory")
                 } for r in overdue[:20]
             ],
 
             # ── PAYABLES & PAYMENT SCHEDULING ────────────────────────────────
+            # Grouped by supplier — use this for the "Suppliers to Pay" panel
+            "suppliers_to_pay": [
+                {
+                    "supplier": s["supplier"],
+                    "total_outstanding": round(s["total_outstanding"], 2),
+                    "invoice_count": s["invoice_count"],
+                    "earliest_due": s["earliest_due"],
+                    "has_overdue": s["has_overdue"],
+                    "invoices": s["invoices"]
+                } for s in suppliers_to_pay
+            ],
             "all_payables": [
                 {
                     "supplier": p["supplier"],
                     "invoice": p["name"],
                     "amount": float(p["outstanding_amount"] or 0),
                     "due_date": str(p["due_date"]),
-                    "days_until_due": (p["due_date"] - today_date).days if p.get("due_date") else 0,
-                    "overdue": bool(p.get("due_date") and p["due_date"] < today_date)
+                    # FIX: safe date arithmetic now that due_date is always a date object
+                    "days_until_due": (p["due_date"] - today_date).days if p["due_date"] else 0,
+                    "overdue": bool(p["due_date"] and p["due_date"] < today_date)
                 } for p in payables[:30]
             ],
             "due_this_week_payables": [
@@ -536,6 +616,7 @@ def get_business_snapshot():
                 {
                     "item": s["item_code"],
                     "name": s["item_name"],
+                    "warehouse": s.get("warehouse"),
                     "stock": float(s["actual_qty"] or 0),
                     "reorder_level": float(s["reorder_level"] or 0),
                     "reorder_qty": float(s.get("reorder_qty") or 0),
