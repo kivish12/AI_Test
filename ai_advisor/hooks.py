@@ -6,17 +6,9 @@ app_email = "admin@yourcompany.com"
 app_license = "MIT"
 app_version = "1.0.0"
 
-# App icon shown in Frappe desk
 app_icon = "octicon octicon-hubot"
 app_color = "#00e5a0"
 
-# Include page in desk
-page_js = {"ai_advisor": "public/js/ai_advisor.js"}
-
-# Website route rules (optional)
-website_route_rules = []
-
-# Permissions
-has_permission = {
-    "AI Advisor Settings": "ai_advisor.ai_advisor.ai_advisor_settings.ai_advisor_settings.has_permission"
-}
+# Page JS is loaded automatically by Frappe from the page folder.
+# Do NOT use page_js here — it loads the script globally on every page
+# including POS, which breaks POS Awesome's stock update submission.
