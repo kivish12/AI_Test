@@ -103,8 +103,8 @@ def get_business_snapshot():
             WHERE a.is_group = 0
               AND a.root_type IN ('Asset', 'Liability', 'Income', 'Expense')
             GROUP BY a.name, a.account_name, a.root_type, a.account_type
-            HAVING ABS(balance) > 0
-            ORDER BY a.root_type, ABS(balance) DESC
+            HAVING ABS(COALESCE(SUM(gl.debit - gl.credit), 0)) > 0
+            ORDER BY a.root_type, ABS(COALESCE(SUM(gl.debit - gl.credit), 0)) DESC
         """, as_dict=True)
 
         coa_summary = {}
