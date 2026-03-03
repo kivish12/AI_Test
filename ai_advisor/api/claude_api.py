@@ -228,7 +228,7 @@ def get_business_snapshot():
 
         # ── PURCHASE HISTORY ──────────────────────────────────────────────────
         purchase_history = frappe.db.sql("""
-            SELECT pii.item_code, pii.item_name, pii.supplier,
+            SELECT pii.item_code, pii.item_name, pi.supplier,
                    SUM(pii.qty) as qty_purchased,
                    AVG(pii.rate) as avg_rate,
                    MAX(pi.posting_date) as last_purchased
@@ -236,7 +236,7 @@ def get_business_snapshot():
             JOIN `tabPurchase Invoice` pi ON pi.name = pii.parent
             WHERE pi.docstatus = 1
               AND pi.posting_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-            GROUP BY pii.item_code, pii.item_name, pii.supplier
+            GROUP BY pii.item_code, pii.item_name, pi.supplier
             ORDER BY qty_purchased DESC LIMIT 30
         """, as_dict=True)
 
@@ -289,7 +289,7 @@ def get_business_snapshot():
             SELECT
                 pii.item_code,
                 pii.item_name,
-                pii.supplier,
+                pi.supplier,
                 YEAR(pi.posting_date) as year,
                 MONTH(pi.posting_date) as month,
                 SUM(pii.qty) as qty_purchased,
@@ -299,7 +299,7 @@ def get_business_snapshot():
             WHERE pi.docstatus = 1
               AND MONTH(pi.posting_date) = %s
               AND YEAR(pi.posting_date) IN (%s, %s)
-            GROUP BY pii.item_code, pii.item_name, pii.supplier,
+            GROUP BY pii.item_code, pii.item_name, pi.supplier,
                      YEAR(pi.posting_date), MONTH(pi.posting_date)
             ORDER BY pii.item_code, year DESC
         """, (current_month, current_year - 1, current_year - 2), as_dict=True)
