@@ -1,744 +1,720 @@
-frappe.pages['ai_advisor'].on_page_load = function(wrapper) {
-	const page = frappe.ui.make_app_page({
-		parent: wrapper,
-		title: '🤖 AI Business Advisor',
-		single_column: true
-	});
+// ─── ALL CODE IS WRAPPED IN AN IIFE ──────────────────────────────────────────
+// This prevents every function and variable from leaking into the global window
+// scope. Without this, functions like loadData(), fmt(), setText(), askClaude()
+// and the appState variable pollute the global namespace and interfere with POS
+// and other ERPNext pages — breaking stock ledger updates on submission.
+// ─────────────────────────────────────────────────────────────────────────────
+(function () {
+	'use strict';
 
-	injectStyles();
-	$(wrapper).find('.layout-main-section').html(getDashboardHTML());
-	initApp(page);
-};
-
-// ─── STATE ───────────────────────────────────────────────────────────────────
-let appState = {
-	data: null,
-	loading: false,
-	currentView: 'dashboard',
-	hasKey: false,
-};
-
-// ─── INIT ────────────────────────────────────────────────────────────────────
-function initApp(page) {
-	page.add_button('↻ Refresh', () => loadData(), { btn_class: 'btn-default' });
-	page.add_button('⚙ Settings', () => showSettings(), { btn_class: 'btn-default' });
-
-	document.querySelectorAll('.aia-nav-item').forEach(el => {
-		el.addEventListener('click', () => {
-			const view = el.dataset.view;
-			switchView(view);
-			document.querySelectorAll('.aia-nav-item').forEach(n => n.classList.remove('active'));
-			el.classList.add('active');
+	frappe.pages['ai_advisor'].on_page_load = function (wrapper) {
+		const page = frappe.ui.make_app_page({
+			parent: wrapper,
+			title: '🤖 AI Business Advisor',
+			single_column: true
 		});
-	});
 
-	document.querySelectorAll('.aia-quick-btn').forEach(btn => {
-		btn.addEventListener('click', () => {
-			const q = btn.dataset.q;
-			if (q) askClaude(q);
-		});
-	});
+		injectStyles();
+		$(wrapper).find('.layout-main-section').html(getDashboardHTML());
+		initApp(page);
+	};
 
-	const chatInput = document.getElementById('aia-chat-input');
-	if (chatInput) {
-		chatInput.addEventListener('keypress', e => {
-			if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMsg(); }
-		});
-	}
+	// ─── STATE ───────────────────────────────────────────────────────────────────
+	let appState = {
+		data: null,
+		loading: false,
+		currentView: 'dashboard',
+		hasKey: false,
+	};
 
-	checkSettings();
-	loadData();
-}
+	// ─── INIT ────────────────────────────────────────────────────────────────────
+	function initApp(page) {
+		page.add_button('↻ Refresh', () => loadData(), { btn_class: 'btn-default' });
+		page.add_button('⚙ Settings', () => showSettings(), { btn_class: 'btn-default' });
 
-// ─── SETTINGS ────────────────────────────────────────────────────────────────
-async function checkSettings() {
-	try {
-		const r = await frappe.call({ method: 'ai_advisor.api.claude_api.get_settings' });
-		if (r.message?.has_key) {
-			appState.hasKey = true;
-			updateKeyStatus(true, r.message.key_preview);
-		} else {
-			updateKeyStatus(false, null);
-		}
-	} catch(e) {}
-}
-
-function updateKeyStatus(hasKey, preview) {
-	const el = document.getElementById('aia-key-status');
-	if (!el) return;
-	el.innerHTML = hasKey
-		? `<span style="color:#00e5a0">✅ Claude connected (${preview})</span>`
-		: `<span style="color:#ff6b6b">⚠️ API key not set — ⚙ Settings</span>`;
-}
-
-function showSettings() {
-	const d = new frappe.ui.Dialog({
-		title: 'AI Advisor Settings',
-		fields: [
-			{
-				label: 'Claude API Key', fieldname: 'claude_api_key', fieldtype: 'Password',
-				description: 'Get your key at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a>.', reqd: 1
-			},
-			{
-				label: 'Info', fieldname: 'info_html', fieldtype: 'HTML',
-				options: `<div style="background:#f8f9fa;padding:12px;border-radius:6px;font-size:12px;line-height:1.6">
-					<b>Steps:</b><br>1. Go to <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a><br>
-					2. Sign up → API Keys → Create Key<br>3. Copy key (starts with <code>sk-ant-</code>)<br>4. Paste above and Save<br><br>
-					<b>Cost:</b> ~$0.003/query. 50 queries/day ≈ KES 580/month.
-				</div>`
-			}
-		],
-		primary_action_label: 'Save',
-		primary_action: async function(values) {
-			const r = await frappe.call({
-				method: 'ai_advisor.api.claude_api.save_settings',
-				args: { claude_api_key: values.claude_api_key }
+		document.querySelectorAll('.aia-nav-item').forEach(el => {
+			el.addEventListener('click', () => {
+				const view = el.dataset.view;
+				switchView(view);
+				document.querySelectorAll('.aia-nav-item').forEach(n => n.classList.remove('active'));
+				el.classList.add('active');
 			});
-			if (r.message?.success) {
-				frappe.show_alert({ message: '✅ API key saved!', indicator: 'green' });
-				appState.hasKey = true; checkSettings(); d.hide();
+		});
+
+		document.querySelectorAll('.aia-quick-btn').forEach(btn => {
+			btn.addEventListener('click', () => {
+				const q = btn.dataset.q;
+				if (q) askClaude(q);
+			});
+		});
+
+		const chatInput = document.getElementById('aia-chat-input');
+		if (chatInput) {
+			chatInput.addEventListener('keypress', e => {
+				if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMsg(); }
+			});
+		}
+
+		// Wire up the send button via event listener instead of inline onclick
+		const sendBtn = document.getElementById('aia-send-btn');
+		if (sendBtn) {
+			sendBtn.addEventListener('click', () => sendChatMsg());
+		}
+
+		checkSettings();
+		loadData();
+	}
+
+	// ─── SETTINGS ────────────────────────────────────────────────────────────────
+	async function checkSettings() {
+		try {
+			const r = await frappe.call({ method: 'ai_advisor.api.claude_api.get_settings' });
+			if (r.message?.has_key) {
+				appState.hasKey = true;
+				updateKeyStatus(true, r.message.key_preview);
 			} else {
-				frappe.msgprint('Error saving key: ' + (r.message?.error || 'Unknown error'));
+				updateKeyStatus(false, null);
 			}
+		} catch (e) { }
+	}
+
+	function updateKeyStatus(hasKey, preview) {
+		const el = document.getElementById('aia-key-status');
+		if (!el) return;
+		el.innerHTML = hasKey
+			? `<span style="color:#00e5a0">✅ Claude connected (${preview})</span>`
+			: `<span style="color:#ff6b6b">⚠️ API key not set — ⚙ Settings</span>`;
+	}
+
+	function showSettings() {
+		const d = new frappe.ui.Dialog({
+			title: 'AI Advisor Settings',
+			fields: [
+				{
+					label: 'Claude API Key', fieldname: 'claude_api_key', fieldtype: 'Password',
+					description: 'Get your key at <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a>.', reqd: 1
+				},
+				{
+					label: 'Info', fieldname: 'info_html', fieldtype: 'HTML',
+					options: `<div style="background:#f8f9fa;padding:12px;border-radius:6px;font-size:12px;line-height:1.6">
+						<b>Steps:</b><br>1. Go to <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a><br>
+						2. Sign up → API Keys → Create Key<br>3. Copy key (starts with <code>sk-ant-</code>)<br>4. Paste above and Save<br><br>
+						<b>Cost:</b> ~$0.003/query. 50 queries/day ≈ KES 580/month.
+					</div>`
+				}
+			],
+			primary_action_label: 'Save',
+			primary_action: async function (values) {
+				const r = await frappe.call({
+					method: 'ai_advisor.api.claude_api.save_settings',
+					args: { claude_api_key: values.claude_api_key }
+				});
+				if (r.message?.success) {
+					frappe.show_alert({ message: '✅ API key saved!', indicator: 'green' });
+					appState.hasKey = true; checkSettings(); d.hide();
+				} else {
+					frappe.msgprint('Error saving key: ' + (r.message?.error || 'Unknown error'));
+				}
+			}
+		});
+		d.show();
+	}
+
+	// ─── DATA LOADING ─────────────────────────────────────────────────────────────
+	async function loadData() {
+		setLoading(true);
+		try {
+			const r = await frappe.call({ method: 'ai_advisor.api.claude_api.get_business_snapshot' });
+			if (r.message?.success) {
+				appState.data = r.message;
+				renderAllData(r.message);
+				frappe.show_alert({ message: '✅ Data refreshed', indicator: 'green' });
+			} else {
+				frappe.show_alert({ message: '⚠️ ' + (r.message?.error || 'Could not load data'), indicator: 'orange' });
+			}
+		} catch (e) {
+			frappe.show_alert({ message: 'Error: ' + e.message, indicator: 'red' });
 		}
-	});
-	d.show();
-}
-
-// ─── DATA LOADING ─────────────────────────────────────────────────────────────
-async function loadData() {
-	setLoading(true);
-	try {
-		const r = await frappe.call({ method: 'ai_advisor.api.claude_api.get_business_snapshot' });
-		if (r.message?.success) {
-			appState.data = r.message;
-			renderAllData(r.message);
-			frappe.show_alert({ message: '✅ Data refreshed', indicator: 'green' });
-		} else {
-			frappe.show_alert({ message: '⚠️ ' + (r.message?.error || 'Could not load data'), indicator: 'orange' });
-		}
-	} catch(e) {
-		frappe.show_alert({ message: 'Error: ' + e.message, indicator: 'red' });
-	}
-	setLoading(false);
-}
-
-function setLoading(v) {
-	appState.loading = v;
-	const s = document.getElementById('aia-spinner');
-	if (s) s.style.display = v ? 'flex' : 'none';
-}
-
-// ─── MASTER RENDER ────────────────────────────────────────────────────────────
-function renderAllData(d) {
-	const kpi = d.kpis || {};
-
-	// KPI Cards
-	setText('aia-kpi-bank',      fmt(kpi.total_bank_balance || 0));
-	setText('aia-kpi-bank-sub',  `Net after 30d: ${fmt(kpi.net_cash_after_30day_dues || 0)}`);
-	setText('aia-kpi-rec',       fmt(kpi.total_receivables || 0));
-	setText('aia-kpi-rec-sub',   `${kpi.open_invoices || 0} open invoices`);
-	setText('aia-kpi-od',        fmt(kpi.total_overdue || 0));
-	setText('aia-kpi-od-sub',    `${kpi.overdue_count || 0} overdue`);
-	setText('aia-kpi-pay',       fmt(kpi.total_payables || 0));
-	setText('aia-kpi-pay-sub',   `Due this week: ${fmt(kpi.due_this_week || 0)}`);
-	setText('aia-kpi-sales',     fmt(kpi.mtd_sales || 0));
-	setText('aia-kpi-sales-sub', 'Month to date');
-
-	// Cash cover banner
-	const coverEl = document.getElementById('aia-cash-cover');
-	if (coverEl) {
-		const cw = kpi.can_cover_week_dues, cm = kpi.can_cover_30day_dues;
-		const bank = kpi.total_bank_balance || 0;
-		const dw = kpi.due_this_week || 0, d30 = kpi.due_next_30_days || 0;
-		coverEl.innerHTML = `
-			<div class="aia-cash-indicator ${cw?'ok':'warn'}">
-				${cw?'✅':'⚠️'} <b>This week:</b> Bank ${fmt(bank)} vs ${fmt(dw)} due —
-				${cw ? 'Fully covered' : '<span style="color:#ff6b6b">SHORTFALL ' + fmt(dw - bank) + '</span>'}
-			</div>
-			<div class="aia-cash-indicator ${cm?'ok':'warn'}" style="margin-top:6px">
-				${cm?'✅':'⚠️'} <b>Next 30 days:</b> ${fmt(d30)} due —
-				${cm ? 'Fully covered' : '<span style="color:#ff6b6b">SHORTFALL ' + fmt(d30 - bank) + '</span>'}
-			</div>`;
+		setLoading(false);
 	}
 
-	// Dashboard widgets
-	renderOverdueWidget(d.overdue_customers || []);
-	// FIX: use suppliers_to_pay (grouped) — fall back to all_payables if not present
-	renderPayablesWidget(d.suppliers_to_pay || d.all_payables || []);
-
-	// Full tab views
-	renderReceivablesFull(d.overdue_customers || [], kpi);
-	renderPayablesFull(d.suppliers_to_pay || [], d.all_payables || [], kpi);
-	// FIX: use low_stock_reorder (correct key from Python)
-	renderInventoryFull(d.low_stock_reorder || [], d.fast_moving_items || [], d.slow_moving_items || [], d.dead_stock_items || []);
-	renderSalesReport(d);
-}
-
-// ─── OVERVIEW: OVERDUE WIDGET ─────────────────────────────────────────────────
-function renderOverdueWidget(rows) {
-	const el = document.getElementById('aia-overdue-rows');
-	if (!el) return;
-	setText('aia-overdue-count', `${rows.length} overdue`);
-	if (!rows.length) {
-		el.innerHTML = `<tr><td colspan="4" class="aia-empty-row">✅ No overdue customers</td></tr>`;
-		return;
-	}
-	el.innerHTML = rows.slice(0, 8).map(r => {
-		const cls = r.days_overdue > 60 ? 'aia-badge-red' : r.days_overdue > 30 ? 'aia-badge-orange' : 'aia-badge-yellow';
-		return `<tr>
-			<td><b>${r.customer}</b></td>
-			<td style="color:#ff6b6b;font-weight:600">${fmt(r.amount)}</td>
-			<td><span class="aia-badge ${cls}">${r.days_overdue}d</span></td>
-			<td><button class="aia-mini-btn" onclick="draftFollowup('${esc(r.customer)}','${fmt(r.amount)}',${r.days_overdue})">✉️</button></td>
-		</tr>`;
-	}).join('');
-}
-
-// ─── OVERVIEW: PAYABLES WIDGET ────────────────────────────────────────────────
-function renderPayablesWidget(rows) {
-	const el = document.getElementById('aia-payables-rows');
-	if (!el) return;
-	setText('aia-payables-count', `${rows.length} suppliers`);
-	if (!rows.length) {
-		el.innerHTML = `<tr><td colspan="3" class="aia-empty-row">✅ No outstanding payables</td></tr>`;
-		return;
-	}
-	// supports both grouped (suppliers_to_pay) and flat (all_payables)
-	el.innerHTML = rows.slice(0, 8).map(p => {
-		const isGrouped = p.total_outstanding !== undefined;
-		const amount = isGrouped ? p.total_outstanding : p.amount;
-		const due    = isGrouped ? p.earliest_due    : p.due_date;
-		let label, cls;
-		if (!due || due === 'No due date' || due === 'None') {
-			cls = 'aia-badge-red'; label = 'No due date';
-		} else {
-			const dl = Math.floor((new Date(due) - new Date()) / 86400000);
-			cls   = dl < 0 ? 'aia-badge-red' : dl < 7 ? 'aia-badge-orange' : 'aia-badge-green';
-			label = dl < 0 ? `${Math.abs(dl)}d overdue` : dl === 0 ? 'Due today' : `${dl}d left`;
-		}
-		return `<tr>
-			<td><b>${p.supplier}</b></td>
-			<td style="color:#ffb347;font-weight:600">${fmt(amount)}</td>
-			<td><span class="aia-badge ${cls}">${label}</span></td>
-		</tr>`;
-	}).join('');
-}
-
-// ─── RECEIVABLES FULL VIEW ────────────────────────────────────────────────────
-function renderReceivablesFull(overdue, kpis) {
-	const el = document.getElementById('aia-receivables-body');
-	if (!el) return;
-
-	if (!overdue.length) {
-		el.innerHTML = `<div class="aia-empty-state">✅ No overdue receivables — all customers are current.</div>`;
-		return;
+	function setLoading(v) {
+		appState.loading = v;
+		const s = document.getElementById('aia-spinner');
+		if (s) s.style.display = v ? 'flex' : 'none';
 	}
 
-	const over60  = overdue.filter(r => r.days_overdue > 60);
-	const over30  = overdue.filter(r => r.days_overdue > 30 && r.days_overdue <= 60);
-	const under30 = overdue.filter(r => r.days_overdue <= 30);
-	const buckets = [
-		{ label: '1–30 days',  items: under30, cls: 'aia-badge-yellow' },
-		{ label: '31–60 days', items: over30,  cls: 'aia-badge-orange' },
-		{ label: '60+ days',   items: over60,  cls: 'aia-badge-red'    },
-	];
+	// ─── MASTER RENDER ────────────────────────────────────────────────────────────
+	function renderAllData(d) {
+		const kpi = d.kpis || {};
 
-	el.innerHTML = `
-		<div class="aia-aging-strip">
-			${buckets.map(b => `
-				<div class="aia-aging-bucket">
-					<div class="aia-aging-label">${b.label}</div>
-					<div class="aia-aging-amount">${fmt(b.items.reduce((s,r)=>s+r.amount,0))}</div>
-					<div class="aia-aging-count">${b.items.length} invoice${b.items.length!==1?'s':''}</div>
+		// KPI Cards
+		setText('aia-kpi-bank', fmt(kpi.total_bank_balance || 0));
+		setText('aia-kpi-bank-sub', `Net after 30d: ${fmt(kpi.net_cash_after_30day_dues || 0)}`);
+		setText('aia-kpi-rec', fmt(kpi.total_receivables || 0));
+		setText('aia-kpi-rec-sub', `${kpi.open_invoices || 0} open invoices`);
+		setText('aia-kpi-od', fmt(kpi.total_overdue || 0));
+		setText('aia-kpi-od-sub', `${kpi.overdue_count || 0} overdue`);
+		setText('aia-kpi-pay', fmt(kpi.total_payables || 0));
+		setText('aia-kpi-pay-sub', `Due this week: ${fmt(kpi.due_this_week || 0)}`);
+		setText('aia-kpi-sales', fmt(kpi.mtd_sales || 0));
+		setText('aia-kpi-sales-sub', 'Month to date');
+
+		// Cash cover banner
+		const coverEl = document.getElementById('aia-cash-cover');
+		if (coverEl) {
+			const cw = kpi.can_cover_week_dues, cm = kpi.can_cover_30day_dues;
+			const bank = kpi.total_bank_balance || 0;
+			const dw = kpi.due_this_week || 0, d30 = kpi.due_next_30_days || 0;
+			coverEl.innerHTML = `
+				<div class="aia-cash-indicator ${cw ? 'ok' : 'warn'}">
+					${cw ? '✅' : '⚠️'} <b>This week:</b> Bank ${fmt(bank)} vs ${fmt(dw)} due —
+					${cw ? 'Fully covered' : '<span style="color:#ff6b6b">SHORTFALL ' + fmt(dw - bank) + '</span>'}
 				</div>
-				<div class="aia-aging-divider"></div>`).join('')}
-			<div class="aia-aging-bucket aia-aging-total">
-				<div class="aia-aging-label">TOTAL OVERDUE</div>
-				<div class="aia-aging-amount" style="color:#ff6b6b">${fmt(overdue.reduce((s,r)=>s+r.amount,0))}</div>
-				<div class="aia-aging-count">${overdue.length} invoices</div>
-			</div>
-		</div>
-		<div class="aia-panel" style="margin-top:14px">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">All Overdue Invoices</div>
-				<button class="aia-mini-btn" onclick="askClaude('List all overdue customers ranked by amount. For each give a collection priority and specific action to take today.')">🤖 AI Collection Plan</button>
-			</div>
-			<table class="aia-table">
-				<thead><tr><th>Customer</th><th>Invoice</th><th>Amount</th><th>Due Date</th><th>Days Overdue</th><th>Territory</th><th>Action</th></tr></thead>
-				<tbody>
-					${overdue.map(r => {
-						const cls = r.days_overdue > 60 ? 'aia-badge-red' : r.days_overdue > 30 ? 'aia-badge-orange' : 'aia-badge-yellow';
-						return `<tr>
-							<td><b>${r.customer}</b></td>
-							<td style="font-size:11px;color:var(--text-muted)">${r.invoice||'—'}</td>
-							<td style="color:#ff6b6b;font-weight:600">${fmt(r.amount)}</td>
-							<td style="font-size:11px">${r.due_date||'—'}</td>
-							<td><span class="aia-badge ${cls}">${r.days_overdue}d</span></td>
-							<td style="font-size:11px;color:var(--text-muted)">${r.territory||'—'}</td>
-							<td><button class="aia-mini-btn" onclick="draftFollowup('${esc(r.customer)}','${fmt(r.amount)}',${r.days_overdue})">✉️ Follow up</button></td>
-						</tr>`;
-					}).join('')}
-				</tbody>
-			</table>
-		</div>`;
-}
+				<div class="aia-cash-indicator ${cm ? 'ok' : 'warn'}" style="margin-top:6px">
+					${cm ? '✅' : '⚠️'} <b>Next 30 days:</b> ${fmt(d30)} due —
+					${cm ? 'Fully covered' : '<span style="color:#ff6b6b">SHORTFALL ' + fmt(d30 - bank) + '</span>'}
+				</div>`;
+		}
 
-// ─── PAYABLES FULL VIEW ───────────────────────────────────────────────────────
-function renderPayablesFull(grouped, flat, kpis) {
-	const el = document.getElementById('aia-payables-body');
-	if (!el) return;
-
-	// prefer grouped view; fall back to flat
-	const rows = grouped.length ? grouped : flat;
-	if (!rows.length) {
-		el.innerHTML = `<div class="aia-empty-state">✅ No outstanding payables.</div>`;
-		return;
+		renderOverdueWidget(d.overdue_customers || []);
+		renderPayablesWidget(d.suppliers_to_pay || d.all_payables || []);
+		renderReceivablesFull(d.overdue_customers || [], kpi);
+		renderPayablesFull(d.suppliers_to_pay || [], d.all_payables || [], kpi);
+		renderInventoryFull(d.low_stock_reorder || [], d.fast_moving_items || [], d.slow_moving_items || [], d.dead_stock_items || []);
+		renderSalesReport(d);
 	}
 
-	const bank  = kpis.total_bank_balance  || 0;
-	const dueW  = kpis.due_this_week       || 0;
-	const due30 = kpis.due_next_30_days    || 0;
-	const total = kpis.total_payables      || 0;
-	const isGrouped = rows[0].total_outstanding !== undefined;
+	// ─── OVERVIEW: OVERDUE WIDGET ─────────────────────────────────────────────────
+	function renderOverdueWidget(rows) {
+		const el = document.getElementById('aia-overdue-rows');
+		if (!el) return;
+		setText('aia-overdue-count', `${rows.length} overdue`);
+		if (!rows.length) {
+			el.innerHTML = `<tr><td colspan="4" class="aia-empty-row">✅ No overdue customers</td></tr>`;
+			return;
+		}
+		el.innerHTML = rows.slice(0, 8).map(r => {
+			const cls = r.days_overdue > 60 ? 'aia-badge-red' : r.days_overdue > 30 ? 'aia-badge-orange' : 'aia-badge-yellow';
+			return `<tr>
+				<td><b>${r.customer}</b></td>
+				<td style="color:#ff6b6b;font-weight:600">${fmt(r.amount)}</td>
+				<td><span class="aia-badge ${cls}">${r.days_overdue}d</span></td>
+				<td><button class="aia-mini-btn aia-followup-btn" data-customer="${esc(r.customer)}" data-amount="${fmt(r.amount)}" data-days="${r.days_overdue}">✉️</button></td>
+			</tr>`;
+		}).join('');
+		// Wire up follow-up buttons via event listeners (not inline onclick)
+		el.querySelectorAll('.aia-followup-btn').forEach(btn => {
+			btn.addEventListener('click', () => draftFollowup(btn.dataset.customer, btn.dataset.amount, btn.dataset.days));
+		});
+	}
 
-	el.innerHTML = `
-		<div class="aia-pay-position">
-			<div class="aia-pay-pos-item">
-				<div class="aia-pay-pos-label">Bank Balance</div>
-				<div class="aia-pay-pos-val" style="color:#00e5a0">${fmt(bank)}</div>
+	// ─── OVERVIEW: PAYABLES WIDGET ────────────────────────────────────────────────
+	function renderPayablesWidget(rows) {
+		const el = document.getElementById('aia-payables-rows');
+		if (!el) return;
+		setText('aia-payables-count', `${rows.length} suppliers`);
+		if (!rows.length) {
+			el.innerHTML = `<tr><td colspan="3" class="aia-empty-row">✅ No outstanding payables</td></tr>`;
+			return;
+		}
+		el.innerHTML = rows.slice(0, 8).map(p => {
+			const isGrouped = p.total_outstanding !== undefined;
+			const amount = isGrouped ? p.total_outstanding : p.amount;
+			const due = isGrouped ? p.earliest_due : p.due_date;
+			let label, cls;
+			if (!due || due === 'No due date' || due === 'None') {
+				cls = 'aia-badge-red'; label = 'No due date';
+			} else {
+				const dl = Math.floor((new Date(due) - new Date()) / 86400000);
+				cls = dl < 0 ? 'aia-badge-red' : dl < 7 ? 'aia-badge-orange' : 'aia-badge-green';
+				label = dl < 0 ? `${Math.abs(dl)}d overdue` : dl === 0 ? 'Due today' : `${dl}d left`;
+			}
+			return `<tr>
+				<td><b>${p.supplier}</b></td>
+				<td style="color:#ffb347;font-weight:600">${fmt(amount)}</td>
+				<td><span class="aia-badge ${cls}">${label}</span></td>
+			</tr>`;
+		}).join('');
+	}
+
+	// ─── RECEIVABLES FULL VIEW ────────────────────────────────────────────────────
+	function renderReceivablesFull(overdue, kpis) {
+		const el = document.getElementById('aia-receivables-body');
+		if (!el) return;
+
+		if (!overdue.length) {
+			el.innerHTML = `<div class="aia-empty-state">✅ No overdue receivables — all customers are current.</div>`;
+			return;
+		}
+
+		const over60 = overdue.filter(r => r.days_overdue > 60);
+		const over30 = overdue.filter(r => r.days_overdue > 30 && r.days_overdue <= 60);
+		const under30 = overdue.filter(r => r.days_overdue <= 30);
+		const buckets = [
+			{ label: '1–30 days', items: under30, cls: 'aia-badge-yellow' },
+			{ label: '31–60 days', items: over30, cls: 'aia-badge-orange' },
+			{ label: '60+ days', items: over60, cls: 'aia-badge-red' },
+		];
+
+		el.innerHTML = `
+			<div class="aia-aging-strip">
+				${buckets.map(b => `
+					<div class="aia-aging-bucket">
+						<div class="aia-aging-label">${b.label}</div>
+						<div class="aia-aging-amount">${fmt(b.items.reduce((s, r) => s + r.amount, 0))}</div>
+						<div class="aia-aging-count">${b.items.length} invoice${b.items.length !== 1 ? 's' : ''}</div>
+					</div>
+					<div class="aia-aging-divider"></div>`).join('')}
+				<div class="aia-aging-bucket aia-aging-total">
+					<div class="aia-aging-label">TOTAL OVERDUE</div>
+					<div class="aia-aging-amount" style="color:#ff6b6b">${fmt(overdue.reduce((s, r) => s + r.amount, 0))}</div>
+					<div class="aia-aging-count">${overdue.length} invoices</div>
+				</div>
 			</div>
-			<div class="aia-pay-pos-arrow">→</div>
-			<div class="aia-pay-pos-item">
-				<div class="aia-pay-pos-label">Due This Week</div>
-				<div class="aia-pay-pos-val" style="color:${bank>=dueW?'#00e5a0':'#ff6b6b'}">${fmt(dueW)}</div>
+			<div class="aia-panel" style="margin-top:14px">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">All Overdue Invoices</div>
+					<button class="aia-mini-btn aia-ai-btn" data-q="List all overdue customers ranked by amount. For each give a collection priority and specific action to take today.">🤖 AI Collection Plan</button>
+				</div>
+				<table class="aia-table">
+					<thead><tr><th>Customer</th><th>Invoice</th><th>Amount</th><th>Due Date</th><th>Days Overdue</th><th>Territory</th><th>Action</th></tr></thead>
+					<tbody>
+						${overdue.map(r => {
+							const cls = r.days_overdue > 60 ? 'aia-badge-red' : r.days_overdue > 30 ? 'aia-badge-orange' : 'aia-badge-yellow';
+							return `<tr>
+								<td><b>${r.customer}</b></td>
+								<td style="font-size:11px;color:var(--text-muted)">${r.invoice || '—'}</td>
+								<td style="color:#ff6b6b;font-weight:600">${fmt(r.amount)}</td>
+								<td style="font-size:11px">${r.due_date || '—'}</td>
+								<td><span class="aia-badge ${cls}">${r.days_overdue}d</span></td>
+								<td style="font-size:11px;color:var(--text-muted)">${r.territory || '—'}</td>
+								<td><button class="aia-mini-btn aia-followup-btn" data-customer="${esc(r.customer)}" data-amount="${fmt(r.amount)}" data-days="${r.days_overdue}">✉️ Follow up</button></td>
+							</tr>`;
+						}).join('')}
+					</tbody>
+				</table>
+			</div>`;
+
+		// Wire buttons via event listeners
+		el.querySelectorAll('.aia-followup-btn').forEach(btn => {
+			btn.addEventListener('click', () => draftFollowup(btn.dataset.customer, btn.dataset.amount, btn.dataset.days));
+		});
+		el.querySelectorAll('.aia-ai-btn').forEach(btn => {
+			btn.addEventListener('click', () => askClaude(btn.dataset.q));
+		});
+	}
+
+	// ─── PAYABLES FULL VIEW ───────────────────────────────────────────────────────
+	function renderPayablesFull(grouped, flat, kpis) {
+		const el = document.getElementById('aia-payables-body');
+		if (!el) return;
+
+		const rows = grouped.length ? grouped : flat;
+		if (!rows.length) {
+			el.innerHTML = `<div class="aia-empty-state">✅ No outstanding payables.</div>`;
+			return;
+		}
+
+		const bank = kpis.total_bank_balance || 0;
+		const dueW = kpis.due_this_week || 0;
+		const due30 = kpis.due_next_30_days || 0;
+		const total = kpis.total_payables || 0;
+		const isGrouped = rows[0].total_outstanding !== undefined;
+
+		el.innerHTML = `
+			<div class="aia-pay-position">
+				<div class="aia-pay-pos-item">
+					<div class="aia-pay-pos-label">Bank Balance</div>
+					<div class="aia-pay-pos-val" style="color:#00e5a0">${fmt(bank)}</div>
+				</div>
+				<div class="aia-pay-pos-arrow">→</div>
+				<div class="aia-pay-pos-item">
+					<div class="aia-pay-pos-label">Due This Week</div>
+					<div class="aia-pay-pos-val" style="color:${bank >= dueW ? '#00e5a0' : '#ff6b6b'}">${fmt(dueW)}</div>
+				</div>
+				<div class="aia-pay-pos-arrow">→</div>
+				<div class="aia-pay-pos-item">
+					<div class="aia-pay-pos-label">Due Next 30 Days</div>
+					<div class="aia-pay-pos-val" style="color:${bank >= due30 ? '#00e5a0' : '#ff6b6b'}">${fmt(due30)}</div>
+				</div>
+				<div class="aia-pay-pos-arrow">→</div>
+				<div class="aia-pay-pos-item">
+					<div class="aia-pay-pos-label">Total Outstanding</div>
+					<div class="aia-pay-pos-val" style="color:#ffb347">${fmt(total)}</div>
+				</div>
+				<button class="aia-mini-btn aia-ai-btn" style="margin-left:auto"
+					data-q="Give me an exact payment schedule. Who to pay, how much, in what order, and which receivables to collect first if cash is tight.">🤖 AI Payment Plan</button>
 			</div>
-			<div class="aia-pay-pos-arrow">→</div>
-			<div class="aia-pay-pos-item">
-				<div class="aia-pay-pos-label">Due Next 30 Days</div>
-				<div class="aia-pay-pos-val" style="color:${bank>=due30?'#00e5a0':'#ff6b6b'}">${fmt(due30)}</div>
+			<div class="aia-panel" style="margin-top:14px">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">Suppliers to Pay — Priority Order</div>
+				</div>
+				<table class="aia-table">
+					<thead><tr><th>Supplier</th><th>Amount Due</th><th>Earliest Due</th><th>Invoices</th><th>Status</th></tr></thead>
+					<tbody>
+						${rows.map(p => {
+							const amount = isGrouped ? p.total_outstanding : p.amount;
+							const due = isGrouped ? p.earliest_due : p.due_date;
+							const invCnt = isGrouped ? p.invoice_count : 1;
+							let label, cls;
+							if (!due || due === 'No due date' || due === 'None') {
+								cls = 'aia-badge-red'; label = 'No due date';
+							} else {
+								const dl = Math.floor((new Date(due) - new Date()) / 86400000);
+								cls = dl < 0 ? 'aia-badge-red' : dl < 7 ? 'aia-badge-orange' : 'aia-badge-green';
+								label = dl < 0 ? `${Math.abs(dl)}d overdue` : dl === 0 ? 'Due today' : `Due in ${dl}d`;
+							}
+							return `<tr>
+								<td><b>${p.supplier}</b></td>
+								<td style="color:#ffb347;font-weight:600">${fmt(amount)}</td>
+								<td style="font-size:11px">${due || '—'}</td>
+								<td style="font-size:11px;color:var(--text-muted)">${invCnt} invoice${invCnt !== 1 ? 's' : ''}</td>
+								<td><span class="aia-badge ${cls}">${label}</span></td>
+							</tr>`;
+						}).join('')}
+					</tbody>
+				</table>
+			</div>`;
+
+		el.querySelectorAll('.aia-ai-btn').forEach(btn => {
+			btn.addEventListener('click', () => askClaude(btn.dataset.q));
+		});
+	}
+
+	// ─── INVENTORY FULL VIEW ──────────────────────────────────────────────────────
+	function renderInventoryFull(lowStock, fast, slow, dead) {
+		setText('aia-stock-count', `${lowStock.length} items low`);
+		const el = document.getElementById('aia-inventory-body');
+		if (!el) return;
+
+		const reorderHtml = lowStock.length ? `
+			<div class="aia-panel" style="margin-bottom:14px">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">🔴 Items Below Reorder Level</div>
+					<button class="aia-mini-btn aia-ai-btn" data-q="Which items are critically low? Give exact order quantities, suggested suppliers and urgency for each.">🤖 AI Order Plan</button>
+				</div>
+				<table class="aia-table">
+					<thead><tr><th>Item</th><th>Warehouse</th><th>In Stock</th><th>Reorder Level</th><th>Reorder Qty</th><th>Buy Price</th><th>Status</th></tr></thead>
+					<tbody>
+						${lowStock.map(s => {
+							const pct = s.reorder_level > 0 ? Math.round(s.stock / s.reorder_level * 100) : 0;
+							const cls = pct < 30 ? 'aia-badge-red' : pct < 60 ? 'aia-badge-orange' : 'aia-badge-yellow';
+							return `<tr>
+								<td><b>${s.name || s.item}</b><br><span style="font-size:10px;color:var(--text-muted)">${s.item}</span></td>
+								<td style="font-size:11px;color:var(--text-muted)">${s.warehouse || '—'}</td>
+								<td><b style="color:#ff6b6b">${s.stock}</b> ${s.uom}</td>
+								<td>${s.reorder_level} ${s.uom}</td>
+								<td style="color:#00e5a0;font-weight:600">${s.reorder_qty > 0 ? s.reorder_qty + ' ' + s.uom : '—'}</td>
+								<td style="font-size:11px">${s.buying_price > 0 ? fmt(s.buying_price) : '—'}</td>
+								<td><span class="aia-badge ${cls}">${pct}% of level</span></td>
+							</tr>`;
+						}).join('')}
+					</tbody>
+				</table>
+			</div>` : `<div class="aia-empty-state" style="margin-bottom:14px">✅ All items are above reorder level.</div>`;
+
+		const fastHtml = fast.length ? `
+			<div class="aia-panel" style="margin-bottom:14px">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">🟢 Fast Moving Items <span style="font-size:11px;font-weight:400;color:var(--text-muted)">sold last 90 days</span></div>
+				</div>
+				<table class="aia-table">
+					<thead><tr><th>Item</th><th>Qty Sold</th><th>Revenue</th><th>Last Sold</th></tr></thead>
+					<tbody>${fast.slice(0, 15).map(i => `<tr>
+						<td><b>${i.name || i.item}</b></td>
+						<td>${i.qty_sold}</td>
+						<td style="color:#00e5a0;font-weight:600">${fmt(i.revenue)}</td>
+						<td style="font-size:11px;color:var(--text-muted)">${i.last_sold}</td>
+					</tr>`).join('')}</tbody>
+				</table>
+			</div>` : '';
+
+		const slowHtml = slow.length ? `
+			<div class="aia-panel" style="margin-bottom:14px">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">🟡 Slow Moving Items <span style="font-size:11px;font-weight:400;color:var(--text-muted)">90–180 days</span></div>
+					<button class="aia-mini-btn aia-ai-btn" data-q="Which slow moving items should I discount? Give a specific discount % for each to clear stock quickly.">🤖 Discount Strategy</button>
+				</div>
+				<table class="aia-table">
+					<thead><tr><th>Item</th><th>Qty Sold</th><th>Revenue</th><th>Last Sold</th><th>Action</th></tr></thead>
+					<tbody>${slow.slice(0, 15).map(i => `<tr>
+						<td><b>${i.name || i.item}</b></td>
+						<td style="color:var(--text-muted)">${i.qty_sold}</td>
+						<td style="color:#ffb347">${fmt(i.revenue)}</td>
+						<td style="font-size:11px;color:var(--text-muted)">${i.last_sold}</td>
+						<td><span class="aia-badge aia-badge-yellow">Consider discount</span></td>
+					</tr>`).join('')}</tbody>
+				</table>
+			</div>` : '';
+
+		const deadHtml = dead.length ? `
+			<div class="aia-panel">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">🔴 Dead Stock <span style="font-size:11px;font-weight:400;color:var(--text-muted)">180+ days no sales</span></div>
+				</div>
+				<table class="aia-table">
+					<thead><tr><th>Item</th><th>Qty Sold (yr)</th><th>Last Sold</th><th>Recommendation</th></tr></thead>
+					<tbody>${dead.slice(0, 15).map(i => `<tr>
+						<td><b>${i.name || i.item}</b></td>
+						<td style="color:var(--text-muted)">${i.qty_sold}</td>
+						<td style="font-size:11px;color:#ff6b6b">${i.last_sold}</td>
+						<td><span class="aia-badge aia-badge-red">Stop reordering</span></td>
+					</tr>`).join('')}</tbody>
+				</table>
+			</div>` : '';
+
+		el.innerHTML = reorderHtml + fastHtml + slowHtml + deadHtml;
+
+		el.querySelectorAll('.aia-ai-btn').forEach(btn => {
+			btn.addEventListener('click', () => askClaude(btn.dataset.q));
+		});
+	}
+
+	// ─── SALES REPORT ─────────────────────────────────────────────────────────────
+	function renderSalesReport(d) {
+		const el = document.getElementById('aia-sales-body');
+		if (!el) return;
+
+		const kpis = d.kpis || {};
+		const trend = d.sales_trend || [];
+		const territories = d.sales_by_territory || [];
+		const topCust = d.top_customers || [];
+		const fast = d.fast_moving_items || [];
+		const forecast = (d.seasonal_forecast_this_month || {}).items || [];
+		const nextFc = (d.seasonal_forecast_next_month || {}).items || [];
+		const mtdName = (d.seasonal_forecast_this_month || {}).month_name || '';
+		const nextName = (d.seasonal_forecast_next_month || {}).month_name || '';
+
+		const amounts = trend.map(t => t.amount);
+		const maxAmt = Math.max(...amounts, 1);
+		const total6m = amounts.reduce((a, b) => a + b, 0);
+		const avg6m = trend.length ? total6m / trend.length : 0;
+		const last2 = amounts.slice(-2);
+		const mom = last2.length === 2 && last2[0] > 0 ? ((last2[1] - last2[0]) / last2[0] * 100).toFixed(1) : null;
+		const totTerr = territories.reduce((s, t) => s + t.revenue, 0);
+
+		el.innerHTML = `
+		<div class="aia-exec-banner">
+			<div class="aia-exec-stat"><div class="aia-exec-label">MTD Revenue</div><div class="aia-exec-val">${fmt(kpis.mtd_sales || 0)}</div></div>
+			<div class="aia-exec-divider"></div>
+			<div class="aia-exec-stat"><div class="aia-exec-label">6-Month Total</div><div class="aia-exec-val">${fmt(total6m)}</div></div>
+			<div class="aia-exec-divider"></div>
+			<div class="aia-exec-stat"><div class="aia-exec-label">Monthly Average</div><div class="aia-exec-val">${fmt(avg6m)}</div></div>
+			<div class="aia-exec-divider"></div>
+			<div class="aia-exec-stat">
+				<div class="aia-exec-label">MoM Change</div>
+				<div class="aia-exec-val" style="color:${mom === null ? 'inherit' : parseFloat(mom) >= 0 ? '#00e5a0' : '#ff6b6b'}">
+					${mom === null ? '—' : (parseFloat(mom) >= 0 ? '▲' : '▼') + ' ' + Math.abs(mom) + '%'}
+				</div>
 			</div>
-			<div class="aia-pay-pos-arrow">→</div>
-			<div class="aia-pay-pos-item">
-				<div class="aia-pay-pos-label">Total Outstanding</div>
-				<div class="aia-pay-pos-val" style="color:#ffb347">${fmt(total)}</div>
-			</div>
-			<button class="aia-mini-btn" style="margin-left:auto" onclick="askClaude('Give me an exact payment schedule. Who to pay, how much, in what order, and which receivables to collect first if cash is tight.')">🤖 AI Payment Plan</button>
+			<div class="aia-exec-divider"></div>
+			<div class="aia-exec-stat"><div class="aia-exec-label">Top Customers</div><div class="aia-exec-val">${topCust.length}</div></div>
+			<div class="aia-exec-divider"></div>
+			<div class="aia-exec-stat"><div class="aia-exec-label">Territories</div><div class="aia-exec-val">${territories.length}</div></div>
+			<button class="aia-mini-btn aia-ai-btn" style="margin-left:auto;align-self:center"
+				data-q="Give me a complete CFO-level sales analysis: revenue trends, growth drivers, top customers, territory performance, product mix, and top 5 strategic recommendations.">
+				🤖 Full CFO Analysis
+			</button>
 		</div>
-		<div class="aia-panel" style="margin-top:14px">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">Suppliers to Pay — Priority Order</div>
+
+		<div class="aia-sales-grid">
+			<div class="aia-panel aia-panel-wide">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">📊 Revenue Trend — Last 6 Months</div>
+					${mom !== null ? `<span class="aia-badge ${parseFloat(mom) >= 0 ? 'aia-badge-green' : 'aia-badge-red'}">${parseFloat(mom) >= 0 ? '▲' : '▼'} ${Math.abs(mom)}% month-on-month</span>` : ''}
+				</div>
+				<div class="aia-chart-area">
+					${trend.length ? trend.map(t => {
+						const pct = Math.round(t.amount / maxAmt * 100);
+						const isMax = t.amount === maxAmt;
+						const isLast = t === trend[trend.length - 1];
+						return `<div class="aia-bar-col">
+							<div class="aia-bar-val" style="color:${isLast ? '#00e5a0' : 'var(--text-muted)'}">${fmt(t.amount)}</div>
+							<div class="aia-bar-wrap"><div class="aia-bar-v ${isMax ? 'aia-bar-peak' : ''} ${isLast ? 'aia-bar-current' : ''}" style="height:${Math.max(pct, 4)}%"></div></div>
+							<div class="aia-bar-month">${t.month}</div>
+							<div style="font-size:9px;color:var(--text-muted);text-align:center">${t.count} orders</div>
+						</div>`;
+					}).join('') : '<div class="aia-empty-row">No trend data</div>'}
+				</div>
 			</div>
-			<table class="aia-table">
-				<thead><tr><th>Supplier</th><th>Amount Due</th><th>Earliest Due</th><th>Invoices</th><th>Status</th></tr></thead>
-				<tbody>
-					${rows.map(p => {
-						const amount  = isGrouped ? p.total_outstanding : p.amount;
-						const due     = isGrouped ? p.earliest_due      : p.due_date;
-						const invCnt  = isGrouped ? p.invoice_count      : 1;
-						let label, cls;
-						if (!due || due === 'No due date' || due === 'None') {
-							cls = 'aia-badge-red'; label = 'No due date';
-						} else {
-							const dl = Math.floor((new Date(due) - new Date()) / 86400000);
-							cls   = dl < 0 ? 'aia-badge-red' : dl < 7 ? 'aia-badge-orange' : 'aia-badge-green';
-							label = dl < 0 ? `${Math.abs(dl)}d overdue` : dl === 0 ? 'Due today' : `Due in ${dl}d`;
-						}
-						return `<tr>
-							<td><b>${p.supplier}</b></td>
-							<td style="color:#ffb347;font-weight:600">${fmt(amount)}</td>
-							<td style="font-size:11px">${due||'—'}</td>
-							<td style="font-size:11px;color:var(--text-muted)">${invCnt} invoice${invCnt!==1?'s':''}</td>
-							<td><span class="aia-badge ${cls}">${label}</span></td>
-						</tr>`;
-					}).join('')}
-				</tbody>
-			</table>
-		</div>`;
-}
 
-// ─── INVENTORY FULL VIEW ──────────────────────────────────────────────────────
-function renderInventoryFull(lowStock, fast, slow, dead) {
-	// FIX: update the badge count in the view header
-	setText('aia-stock-count', `${lowStock.length} items low`);
-
-	const el = document.getElementById('aia-inventory-body');
-	if (!el) return;
-
-	const reorderHtml = lowStock.length ? `
-		<div class="aia-panel" style="margin-bottom:14px">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">🔴 Items Below Reorder Level</div>
-				<button class="aia-mini-btn" onclick="askClaude('Which items are critically low? Give exact order quantities, suggested suppliers and urgency for each.')">🤖 AI Order Plan</button>
-			</div>
-			<table class="aia-table">
-				<thead><tr><th>Item</th><th>Warehouse</th><th>In Stock</th><th>Reorder Level</th><th>Reorder Qty</th><th>Buy Price</th><th>Status</th></tr></thead>
-				<tbody>
-					${lowStock.map(s => {
-						const pct = s.reorder_level > 0 ? Math.round(s.stock / s.reorder_level * 100) : 0;
-						const cls = pct < 30 ? 'aia-badge-red' : pct < 60 ? 'aia-badge-orange' : 'aia-badge-yellow';
-						return `<tr>
-							<td><b>${s.name||s.item}</b><br><span style="font-size:10px;color:var(--text-muted)">${s.item}</span></td>
-							<td style="font-size:11px;color:var(--text-muted)">${s.warehouse||'—'}</td>
-							<td><b style="color:#ff6b6b">${s.stock}</b> ${s.uom}</td>
-							<td>${s.reorder_level} ${s.uom}</td>
-							<td style="color:#00e5a0;font-weight:600">${s.reorder_qty>0?s.reorder_qty+' '+s.uom:'—'}</td>
-							<td style="font-size:11px">${s.buying_price>0?fmt(s.buying_price):'—'}</td>
-							<td><span class="aia-badge ${cls}">${pct}% of level</span></td>
-						</tr>`;
-					}).join('')}
-				</tbody>
-			</table>
-		</div>` : `<div class="aia-empty-state" style="margin-bottom:14px">✅ All items are above reorder level.</div>`;
-
-	const fastHtml = fast.length ? `
-		<div class="aia-panel" style="margin-bottom:14px">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">🟢 Fast Moving Items <span style="font-size:11px;font-weight:400;color:var(--text-muted)">sold last 90 days</span></div>
-			</div>
-			<table class="aia-table">
-				<thead><tr><th>Item</th><th>Qty Sold</th><th>Revenue</th><th>Last Sold</th></tr></thead>
-				<tbody>${fast.slice(0,15).map(i=>`<tr>
-					<td><b>${i.name||i.item}</b></td>
-					<td>${i.qty_sold}</td>
-					<td style="color:#00e5a0;font-weight:600">${fmt(i.revenue)}</td>
-					<td style="font-size:11px;color:var(--text-muted)">${i.last_sold}</td>
-				</tr>`).join('')}</tbody>
-			</table>
-		</div>` : '';
-
-	const slowHtml = slow.length ? `
-		<div class="aia-panel" style="margin-bottom:14px">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">🟡 Slow Moving Items <span style="font-size:11px;font-weight:400;color:var(--text-muted)">90–180 days</span></div>
-				<button class="aia-mini-btn" onclick="askClaude('Which slow moving items should I discount? Give a specific discount % for each to clear stock quickly.')">🤖 Discount Strategy</button>
-			</div>
-			<table class="aia-table">
-				<thead><tr><th>Item</th><th>Qty Sold</th><th>Revenue</th><th>Last Sold</th><th>Action</th></tr></thead>
-				<tbody>${slow.slice(0,15).map(i=>`<tr>
-					<td><b>${i.name||i.item}</b></td>
-					<td style="color:var(--text-muted)">${i.qty_sold}</td>
-					<td style="color:#ffb347">${fmt(i.revenue)}</td>
-					<td style="font-size:11px;color:var(--text-muted)">${i.last_sold}</td>
-					<td><span class="aia-badge aia-badge-yellow">Consider discount</span></td>
-				</tr>`).join('')}</tbody>
-			</table>
-		</div>` : '';
-
-	const deadHtml = dead.length ? `
-		<div class="aia-panel">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">🔴 Dead Stock <span style="font-size:11px;font-weight:400;color:var(--text-muted)">180+ days no sales</span></div>
-			</div>
-			<table class="aia-table">
-				<thead><tr><th>Item</th><th>Qty Sold (yr)</th><th>Last Sold</th><th>Recommendation</th></tr></thead>
-				<tbody>${dead.slice(0,15).map(i=>`<tr>
-					<td><b>${i.name||i.item}</b></td>
-					<td style="color:var(--text-muted)">${i.qty_sold}</td>
-					<td style="font-size:11px;color:#ff6b6b">${i.last_sold}</td>
-					<td><span class="aia-badge aia-badge-red">Stop reordering</span></td>
-				</tr>`).join('')}</tbody>
-			</table>
-		</div>` : '';
-
-	el.innerHTML = reorderHtml + fastHtml + slowHtml + deadHtml;
-}
-
-// ─── SALES REPORT (CFO GRADE) ─────────────────────────────────────────────────
-function renderSalesReport(d) {
-	const el = document.getElementById('aia-sales-body');
-	if (!el) return;
-
-	const kpis        = d.kpis || {};
-	const trend       = d.sales_trend || [];
-	const territories = d.sales_by_territory || [];
-	const topCust     = d.top_customers || [];
-	const fast        = d.fast_moving_items || [];
-	const forecast    = (d.seasonal_forecast_this_month || {}).items || [];
-	const nextFc      = (d.seasonal_forecast_next_month  || {}).items || [];
-	const mtdName     = (d.seasonal_forecast_this_month  || {}).month_name || '';
-	const nextName    = (d.seasonal_forecast_next_month  || {}).month_name || '';
-
-	const amounts = trend.map(t => t.amount);
-	const maxAmt  = Math.max(...amounts, 1);
-	const total6m = amounts.reduce((a, b) => a + b, 0);
-	const avg6m   = trend.length ? total6m / trend.length : 0;
-	const last2   = amounts.slice(-2);
-	const mom     = last2.length === 2 && last2[0] > 0 ? ((last2[1]-last2[0])/last2[0]*100).toFixed(1) : null;
-	const totTerr = territories.reduce((s, t) => s + t.revenue, 0);
-
-	el.innerHTML = `
-	<!-- Executive Summary -->
-	<div class="aia-exec-banner">
-		<div class="aia-exec-stat">
-			<div class="aia-exec-label">MTD Revenue</div>
-			<div class="aia-exec-val">${fmt(kpis.mtd_sales||0)}</div>
-		</div>
-		<div class="aia-exec-divider"></div>
-		<div class="aia-exec-stat">
-			<div class="aia-exec-label">6-Month Total</div>
-			<div class="aia-exec-val">${fmt(total6m)}</div>
-		</div>
-		<div class="aia-exec-divider"></div>
-		<div class="aia-exec-stat">
-			<div class="aia-exec-label">Monthly Average</div>
-			<div class="aia-exec-val">${fmt(avg6m)}</div>
-		</div>
-		<div class="aia-exec-divider"></div>
-		<div class="aia-exec-stat">
-			<div class="aia-exec-label">MoM Change</div>
-			<div class="aia-exec-val" style="color:${mom===null?'inherit':parseFloat(mom)>=0?'#00e5a0':'#ff6b6b'}">
-				${mom===null ? '—' : (parseFloat(mom)>=0?'▲':'▼')+' '+Math.abs(mom)+'%'}
-			</div>
-		</div>
-		<div class="aia-exec-divider"></div>
-		<div class="aia-exec-stat">
-			<div class="aia-exec-label">Top Customers</div>
-			<div class="aia-exec-val">${topCust.length}</div>
-		</div>
-		<div class="aia-exec-divider"></div>
-		<div class="aia-exec-stat">
-			<div class="aia-exec-label">Territories</div>
-			<div class="aia-exec-val">${territories.length}</div>
-		</div>
-		<button class="aia-mini-btn" style="margin-left:auto;align-self:center"
-			onclick="askClaude('Give me a complete CFO-level sales analysis: revenue trends, growth drivers, top customers, territory performance, product mix, and top 5 strategic recommendations.')">
-			🤖 Full CFO Analysis
-		</button>
-	</div>
-
-	<div class="aia-sales-grid">
-
-		<!-- Revenue Trend Chart -->
-		<div class="aia-panel aia-panel-wide">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">📊 Revenue Trend — Last 6 Months</div>
-				${mom!==null ? `<span class="aia-badge ${parseFloat(mom)>=0?'aia-badge-green':'aia-badge-red'}">${parseFloat(mom)>=0?'▲':'▼'} ${Math.abs(mom)}% month-on-month</span>` : ''}
-			</div>
-			<div class="aia-chart-area">
-				${trend.length ? trend.map(t => {
-					const pct = Math.round(t.amount / maxAmt * 100);
-					const isMax = t.amount === maxAmt;
-					const isLast = t === trend[trend.length-1];
-					return `<div class="aia-bar-col">
-						<div class="aia-bar-val" style="color:${isLast?'#00e5a0':'var(--text-muted)'}">${fmt(t.amount)}</div>
-						<div class="aia-bar-wrap">
-							<div class="aia-bar-v ${isMax?'aia-bar-peak':''} ${isLast?'aia-bar-current':''}" style="height:${Math.max(pct,4)}%"></div>
-						</div>
-						<div class="aia-bar-month">${t.month}</div>
-						<div style="font-size:9px;color:var(--text-muted);text-align:center">${t.count} orders</div>
-					</div>`;
-				}).join('') : '<div class="aia-empty-row">No trend data</div>'}
-			</div>
-		</div>
-
-		<!-- Territory Performance -->
-		<div class="aia-panel">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">🗺️ Revenue by Territory</div>
-				<span style="font-size:11px;color:var(--text-muted)">Last 6 months</span>
-			</div>
-			${territories.length ? `
-			<table class="aia-table">
-				<thead><tr><th>Territory</th><th>Revenue</th><th>Share</th><th>Orders</th><th>Customers</th></tr></thead>
-				<tbody>
+			<div class="aia-panel">
+				<div class="aia-panel-header"><div class="aia-panel-title">🗺️ Revenue by Territory</div><span style="font-size:11px;color:var(--text-muted)">Last 6 months</span></div>
+				${territories.length ? `<table class="aia-table"><thead><tr><th>Territory</th><th>Revenue</th><th>Share</th><th>Orders</th><th>Customers</th></tr></thead><tbody>
 					${territories.map((t, i) => {
-						const share = totTerr > 0 ? (t.revenue/totTerr*100).toFixed(1) : 0;
-						const barW  = territories[0].revenue > 0 ? Math.round(t.revenue/territories[0].revenue*80) : 0;
+						const share = totTerr > 0 ? (t.revenue / totTerr * 100).toFixed(1) : 0;
+						const barW = territories[0].revenue > 0 ? Math.round(t.revenue / territories[0].revenue * 80) : 0;
 						return `<tr>
-							<td>
-								<div style="display:flex;align-items:center;gap:8px">
-									<span style="font-size:10px;color:var(--text-muted);width:14px">${i+1}</span>
-									<div>
-										<b>${t.territory}</b>
-										<div style="margin-top:3px;height:3px;width:${barW}px;background:${i===0?'#00e5a0':'#7c6cfa'};border-radius:2px"></div>
-									</div>
-								</div>
-							</td>
+							<td><div style="display:flex;align-items:center;gap:8px"><span style="font-size:10px;color:var(--text-muted);width:14px">${i + 1}</span>
+							<div><b>${t.territory}</b><div style="margin-top:3px;height:3px;width:${barW}px;background:${i === 0 ? '#00e5a0' : '#7c6cfa'};border-radius:2px"></div></div></div></td>
 							<td style="color:#00e5a0;font-weight:600">${fmt(t.revenue)}</td>
 							<td style="font-size:11px;color:var(--text-muted)">${share}%</td>
 							<td style="font-size:11px">${t.orders}</td>
 							<td style="font-size:11px">${t.customers}</td>
 						</tr>`;
 					}).join('')}
-				</tbody>
-			</table>` : '<div class="aia-empty-row">No territory data</div>'}
-		</div>
-
-		<!-- Top Customers -->
-		<div class="aia-panel">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">👥 Top Customers — Last 12 Months</div>
+				</tbody></table>` : '<div class="aia-empty-row">No territory data</div>'}
 			</div>
-			${topCust.length ? `
-			<table class="aia-table">
-				<thead><tr><th>#</th><th>Customer</th><th>Revenue</th><th>Orders</th><th>Territory</th></tr></thead>
-				<tbody>
-					${topCust.map((c,i) => `<tr>
-						<td style="color:var(--text-muted);font-size:11px">${i+1}</td>
-						<td><b>${c.customer}</b><br><span style="font-size:10px;color:var(--text-muted)">${c.group||''}</span></td>
+
+			<div class="aia-panel">
+				<div class="aia-panel-header"><div class="aia-panel-title">👥 Top Customers — Last 12 Months</div></div>
+				${topCust.length ? `<table class="aia-table"><thead><tr><th>#</th><th>Customer</th><th>Revenue</th><th>Orders</th><th>Territory</th></tr></thead><tbody>
+					${topCust.map((c, i) => `<tr>
+						<td style="color:var(--text-muted);font-size:11px">${i + 1}</td>
+						<td><b>${c.customer}</b><br><span style="font-size:10px;color:var(--text-muted)">${c.group || ''}</span></td>
 						<td style="color:#00e5a0;font-weight:600">${fmt(c.revenue)}</td>
 						<td style="font-size:11px">${c.orders}</td>
-						<td style="font-size:11px;color:var(--text-muted)">${c.territory||'—'}</td>
+						<td style="font-size:11px;color:var(--text-muted)">${c.territory || '—'}</td>
 					</tr>`).join('')}
-				</tbody>
-			</table>` : '<div class="aia-empty-row">No data</div>'}
-		</div>
-
-		<!-- Top Products -->
-		<div class="aia-panel">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">📦 Top Selling Products — Last 12 Months</div>
+				</tbody></table>` : '<div class="aia-empty-row">No data</div>'}
 			</div>
-			${fast.length ? `
-			<table class="aia-table">
-				<thead><tr><th>#</th><th>Product</th><th>Qty Sold</th><th>Revenue</th><th>Last Sold</th></tr></thead>
-				<tbody>
-					${fast.slice(0,12).map((i,idx) => `<tr>
-						<td style="color:var(--text-muted);font-size:11px">${idx+1}</td>
-						<td><b>${i.name||i.item}</b><br><span style="font-size:10px;color:var(--text-muted)">${i.item}</span></td>
+
+			<div class="aia-panel">
+				<div class="aia-panel-header"><div class="aia-panel-title">📦 Top Selling Products — Last 12 Months</div></div>
+				${fast.length ? `<table class="aia-table"><thead><tr><th>#</th><th>Product</th><th>Qty Sold</th><th>Revenue</th><th>Last Sold</th></tr></thead><tbody>
+					${fast.slice(0, 12).map((i, idx) => `<tr>
+						<td style="color:var(--text-muted);font-size:11px">${idx + 1}</td>
+						<td><b>${i.name || i.item}</b><br><span style="font-size:10px;color:var(--text-muted)">${i.item}</span></td>
 						<td style="font-size:11px">${i.qty_sold}</td>
 						<td style="color:#00e5a0;font-weight:600">${fmt(i.revenue)}</td>
 						<td style="font-size:11px;color:var(--text-muted)">${i.last_sold}</td>
 					</tr>`).join('')}
-				</tbody>
-			</table>` : '<div class="aia-empty-row">No product data</div>'}
-		</div>
-
-		${forecast.length ? `
-		<!-- Seasonal Forecast This Month -->
-		<div class="aia-panel aia-panel-wide">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">🔮 Seasonal Sales Forecast — ${mtdName}</div>
-				<div style="display:flex;gap:8px;align-items:center">
-					<span style="font-size:11px;color:var(--text-muted)">Based on same month last 2 years</span>
-					<button class="aia-mini-btn" onclick="askClaude('Based on the seasonal forecast, which items need urgent stock replenishment? Give exact order quantities and cost estimates.')">🤖 Order Plan</button>
-				</div>
+				</tbody></table>` : '<div class="aia-empty-row">No product data</div>'}
 			</div>
-			<table class="aia-table">
-				<thead><tr><th>Item</th><th>Forecast Qty</th><th>Forecast Revenue</th><th>Current Stock</th><th>Order Qty Needed</th><th>Status</th></tr></thead>
-				<tbody>
-					${forecast.slice(0,15).map(f => `<tr>
+
+			${forecast.length ? `
+			<div class="aia-panel aia-panel-wide">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">🔮 Seasonal Sales Forecast — ${mtdName}</div>
+					<div style="display:flex;gap:8px;align-items:center">
+						<span style="font-size:11px;color:var(--text-muted)">Based on same month last 2 years</span>
+						<button class="aia-mini-btn aia-ai-btn" data-q="Based on the seasonal forecast, which items need urgent stock replenishment? Give exact order quantities and cost estimates.">🤖 Order Plan</button>
+					</div>
+				</div>
+				<table class="aia-table">
+					<thead><tr><th>Item</th><th>Forecast Qty</th><th>Forecast Revenue</th><th>Current Stock</th><th>Order Qty Needed</th><th>Status</th></tr></thead>
+					<tbody>${forecast.slice(0, 15).map(f => `<tr>
 						<td><b>${f.item_name}</b><br><span style="font-size:10px;color:var(--text-muted)">${f.item_code}</span></td>
 						<td>${f.avg_qty_forecast}</td>
 						<td style="color:#7c6cfa;font-weight:600">${fmt(f.avg_revenue_forecast)}</td>
-						<td style="color:${f.current_stock<f.avg_qty_forecast?'#ff6b6b':'#00e5a0'};font-weight:600">${f.current_stock}</td>
-						<td style="color:${f.recommended_order_qty>0?'#ffb347':'var(--text-muted)'};font-weight:600">
+						<td style="color:${f.current_stock < f.avg_qty_forecast ? '#ff6b6b' : '#00e5a0'};font-weight:600">${f.current_stock}</td>
+						<td style="color:${f.recommended_order_qty > 0 ? '#ffb347' : 'var(--text-muted)'};font-weight:600">
 							${f.recommended_order_qty > 0 ? f.recommended_order_qty : '✅ Sufficient'}
 						</td>
-						<td><span class="aia-badge ${f.urgent?'aia-badge-red':'aia-badge-green'}">${f.urgent?'⚠️ URGENT ORDER':'✅ Covered'}</span></td>
-					</tr>`).join('')}
-				</tbody>
-			</table>
-		</div>` : ''}
+						<td><span class="aia-badge ${f.urgent ? 'aia-badge-red' : 'aia-badge-green'}">${f.urgent ? '⚠️ URGENT ORDER' : '✅ Covered'}</span></td>
+					</tr>`).join('')}</tbody>
+				</table>
+			</div>` : ''}
 
-		${nextFc.filter(f => f.order_now_for_next_month > 0).length ? `
-		<!-- Next Month Order Plan -->
-		<div class="aia-panel aia-panel-wide">
-			<div class="aia-panel-header">
-				<div class="aia-panel-title">📅 Order Now for Next Month — ${nextName}</div>
-				<span style="font-size:11px;color:var(--text-muted)">Place purchase orders now to avoid stockouts next month</span>
-			</div>
-			<table class="aia-table">
-				<thead><tr><th>Item</th><th>Expected Demand</th><th>Expected Revenue</th><th>Current Stock</th><th>Order Qty Now</th></tr></thead>
-				<tbody>
-					${nextFc.filter(f=>f.order_now_for_next_month>0).slice(0,10).map(f=>`<tr>
+			${nextFc.filter(f => f.order_now_for_next_month > 0).length ? `
+			<div class="aia-panel aia-panel-wide">
+				<div class="aia-panel-header">
+					<div class="aia-panel-title">📅 Order Now for Next Month — ${nextName}</div>
+					<span style="font-size:11px;color:var(--text-muted)">Place purchase orders now to avoid stockouts next month</span>
+				</div>
+				<table class="aia-table">
+					<thead><tr><th>Item</th><th>Expected Demand</th><th>Expected Revenue</th><th>Current Stock</th><th>Order Qty Now</th></tr></thead>
+					<tbody>${nextFc.filter(f => f.order_now_for_next_month > 0).slice(0, 10).map(f => `<tr>
 						<td><b>${f.item_name}</b></td>
 						<td>${f.avg_qty_forecast}</td>
 						<td style="color:#7c6cfa">${fmt(f.avg_revenue_forecast)}</td>
 						<td style="color:var(--text-muted)">${f.current_stock}</td>
 						<td style="color:#ffb347;font-weight:600">${f.order_now_for_next_month}</td>
-					</tr>`).join('')}
-				</tbody>
-			</table>
-		</div>` : ''}
+					</tr>`).join('')}</tbody>
+				</table>
+			</div>` : ''}
+		</div>`;
 
-	</div>`;
-}
-
-// ─── VIEWS ────────────────────────────────────────────────────────────────────
-function switchView(view) {
-	appState.currentView = view;
-	document.querySelectorAll('.aia-view').forEach(v => v.classList.remove('active'));
-	const el = document.getElementById(`aia-view-${view}`);
-	if (el) el.classList.add('active');
-}
-
-// ─── AI CHAT ─────────────────────────────────────────────────────────────────
-async function askClaude(question) {
-	switchView('advisor');
-	document.querySelectorAll('.aia-nav-item').forEach(n => n.classList.remove('active'));
-	document.querySelector('[data-view="advisor"]')?.classList.add('active');
-
-	const chat = document.getElementById('aia-chat-messages');
-	const empty = chat.querySelector('.aia-chat-empty');
-	if (empty) empty.remove();
-
-	addChatMsg(chat, 'user', question);
-	const typing = addChatMsg(chat, 'ai', `<div class="aia-typing"><span></span><span></span><span></span></div>`);
-	chat.scrollTop = chat.scrollHeight;
-
-	const btn = document.getElementById('aia-send-btn');
-	if (btn) btn.disabled = true;
-
-	try {
-		const r = await frappe.call({
-			method: 'ai_advisor.api.claude_api.ask_claude',
-			args: { question, context_data: JSON.stringify(appState.data || {}) }
+		el.querySelectorAll('.aia-ai-btn').forEach(btn => {
+			btn.addEventListener('click', () => askClaude(btn.dataset.q));
 		});
-		const bubble = typing.querySelector('.aia-msg-bubble');
-		bubble.innerHTML = r.message?.success
-			? formatAIResponse(r.message.response)
-			: `<span style="color:#ff6b6b">❌ ${r.message?.error || 'Unknown error'}</span>`;
-	} catch(e) {
-		typing.querySelector('.aia-msg-bubble').innerHTML = `<span style="color:#ff6b6b">❌ ${e.message}</span>`;
 	}
 
-	if (btn) btn.disabled = false;
-	chat.scrollTop = chat.scrollHeight;
-}
+	// ─── VIEWS ────────────────────────────────────────────────────────────────────
+	function switchView(view) {
+		appState.currentView = view;
+		document.querySelectorAll('.aia-view').forEach(v => v.classList.remove('active'));
+		const el = document.getElementById(`aia-view-${view}`);
+		if (el) el.classList.add('active');
+	}
 
-async function sendChatMsg() {
-	const input = document.getElementById('aia-chat-input');
-	const msg = input?.value?.trim();
-	if (!msg) return;
-	input.value = '';
-	await askClaude(msg);
-}
+	// ─── AI CHAT ─────────────────────────────────────────────────────────────────
+	async function askClaude(question) {
+		switchView('advisor');
+		document.querySelectorAll('.aia-nav-item').forEach(n => n.classList.remove('active'));
+		document.querySelector('[data-view="advisor"]')?.classList.add('active');
 
-function addChatMsg(container, role, content) {
-	const el = document.createElement('div');
-	el.className = `aia-msg aia-msg-${role}`;
-	el.innerHTML = `<div class="aia-msg-avatar">${role==='ai'?'🤖':'👤'}</div><div class="aia-msg-bubble">${content}</div>`;
-	container.appendChild(el);
-	return el;
-}
+		const chat = document.getElementById('aia-chat-messages');
+		const empty = chat.querySelector('.aia-chat-empty');
+		if (empty) empty.remove();
 
-function formatAIResponse(text) {
-	return text
-		.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-		.replace(/^#{1,3}\s(.+)$/gm, '<div class="aia-resp-heading">$1</div>')
-		.replace(/^[-•]\s(.+)$/gm, '<div class="aia-resp-bullet">• $1</div>')
-		.replace(/\n\n/g, '<br><br>')
-		.replace(/\n/g, '<br>');
-}
+		addChatMsg(chat, 'user', question);
+		const typing = addChatMsg(chat, 'ai', `<div class="aia-typing"><span></span><span></span><span></span></div>`);
+		chat.scrollTop = chat.scrollHeight;
 
-async function draftFollowup(customer, amount, days) {
-	await askClaude(`Draft a professional follow-up for ${customer} who owes ${amount} and is ${days} days overdue. Be firm but professional. Set a 7-day payment deadline. Format for WhatsApp.`);
-}
+		const btn = document.getElementById('aia-send-btn');
+		if (btn) btn.disabled = true;
 
-// ─── UTILS ────────────────────────────────────────────────────────────────────
-function fmt(n) {
-	n = parseFloat(n) || 0;
-	if (n >= 1000000) return 'KES ' + (n/1000000).toFixed(2) + 'M';
-	if (n >= 1000)    return 'KES ' + (n/1000).toFixed(1) + 'K';
-	return 'KES ' + n.toFixed(0);
-}
-function setText(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
-function esc(s) { return (s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+		try {
+			const r = await frappe.call({
+				method: 'ai_advisor.api.claude_api.ask_claude',
+				args: { question, context_data: JSON.stringify(appState.data || {}) }
+			});
+			const bubble = typing.querySelector('.aia-msg-bubble');
+			bubble.innerHTML = r.message?.success
+				? formatAIResponse(r.message.response)
+				: `<span style="color:#ff6b6b">❌ ${r.message?.error || 'Unknown error'}</span>`;
+		} catch (e) {
+			typing.querySelector('.aia-msg-bubble').innerHTML = `<span style="color:#ff6b6b">❌ ${e.message}</span>`;
+		}
 
-// ─── HTML ────────────────────────────────────────────────────────────────────
-function getDashboardHTML() { return `
+		if (btn) btn.disabled = false;
+		chat.scrollTop = chat.scrollHeight;
+	}
+
+	async function sendChatMsg() {
+		const input = document.getElementById('aia-chat-input');
+		const msg = input?.value?.trim();
+		if (!msg) return;
+		input.value = '';
+		await askClaude(msg);
+	}
+
+	function addChatMsg(container, role, content) {
+		const el = document.createElement('div');
+		el.className = `aia-msg aia-msg-${role}`;
+		el.innerHTML = `<div class="aia-msg-avatar">${role === 'ai' ? '🤖' : '👤'}</div><div class="aia-msg-bubble">${content}</div>`;
+		container.appendChild(el);
+		return el;
+	}
+
+	function formatAIResponse(text) {
+		return text
+			.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+			.replace(/^#{1,3}\s(.+)$/gm, '<div class="aia-resp-heading">$1</div>')
+			.replace(/^[-•]\s(.+)$/gm, '<div class="aia-resp-bullet">• $1</div>')
+			.replace(/\n\n/g, '<br><br>')
+			.replace(/\n/g, '<br>');
+	}
+
+	async function draftFollowup(customer, amount, days) {
+		await askClaude(`Draft a professional follow-up for ${customer} who owes ${amount} and is ${days} days overdue. Be firm but professional. Set a 7-day payment deadline. Format for WhatsApp.`);
+	}
+
+	// ─── UTILS ────────────────────────────────────────────────────────────────────
+	function fmt(n) {
+		n = parseFloat(n) || 0;
+		if (n >= 1000000) return 'KES ' + (n / 1000000).toFixed(2) + 'M';
+		if (n >= 1000) return 'KES ' + (n / 1000).toFixed(1) + 'K';
+		return 'KES ' + n.toFixed(0);
+	}
+	function setText(id, text) { const el = document.getElementById(id); if (el) el.textContent = text; }
+	function esc(s) { return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+	// ─── HTML ─────────────────────────────────────────────────────────────────────
+	function getDashboardHTML() {
+		return `
 <div class="aia-wrap">
 	<div class="aia-sidebar">
 		<div class="aia-brand">
@@ -769,34 +745,13 @@ function getDashboardHTML() { return `
 			<div style="font-size:11px;color:var(--text-muted);letter-spacing:2px;margin-top:8px">LOADING ERP DATA...</div>
 		</div>
 
-		<!-- OVERVIEW -->
 		<div class="aia-view active" id="aia-view-dashboard">
 			<div class="aia-kpi-grid">
-				<div class="aia-kpi aia-kpi-blue">
-					<div class="aia-kpi-label">Bank Balance</div>
-					<div class="aia-kpi-value" id="aia-kpi-bank">—</div>
-					<div class="aia-kpi-sub" id="aia-kpi-bank-sub">Loading...</div>
-				</div>
-				<div class="aia-kpi aia-kpi-green">
-					<div class="aia-kpi-label">Total Receivables</div>
-					<div class="aia-kpi-value" id="aia-kpi-rec">—</div>
-					<div class="aia-kpi-sub" id="aia-kpi-rec-sub">Loading...</div>
-				</div>
-				<div class="aia-kpi aia-kpi-red">
-					<div class="aia-kpi-label">Overdue Amount</div>
-					<div class="aia-kpi-value" id="aia-kpi-od">—</div>
-					<div class="aia-kpi-sub" id="aia-kpi-od-sub">Loading...</div>
-				</div>
-				<div class="aia-kpi aia-kpi-orange">
-					<div class="aia-kpi-label">Payables Outstanding</div>
-					<div class="aia-kpi-value" id="aia-kpi-pay">—</div>
-					<div class="aia-kpi-sub" id="aia-kpi-pay-sub">Loading...</div>
-				</div>
-				<div class="aia-kpi aia-kpi-purple">
-					<div class="aia-kpi-label">MTD Sales</div>
-					<div class="aia-kpi-value" id="aia-kpi-sales">—</div>
-					<div class="aia-kpi-sub" id="aia-kpi-sales-sub">Loading...</div>
-				</div>
+				<div class="aia-kpi aia-kpi-blue"><div class="aia-kpi-label">Bank Balance</div><div class="aia-kpi-value" id="aia-kpi-bank">—</div><div class="aia-kpi-sub" id="aia-kpi-bank-sub">Loading...</div></div>
+				<div class="aia-kpi aia-kpi-green"><div class="aia-kpi-label">Total Receivables</div><div class="aia-kpi-value" id="aia-kpi-rec">—</div><div class="aia-kpi-sub" id="aia-kpi-rec-sub">Loading...</div></div>
+				<div class="aia-kpi aia-kpi-red"><div class="aia-kpi-label">Overdue Amount</div><div class="aia-kpi-value" id="aia-kpi-od">—</div><div class="aia-kpi-sub" id="aia-kpi-od-sub">Loading...</div></div>
+				<div class="aia-kpi aia-kpi-orange"><div class="aia-kpi-label">Payables Outstanding</div><div class="aia-kpi-value" id="aia-kpi-pay">—</div><div class="aia-kpi-sub" id="aia-kpi-pay-sub">Loading...</div></div>
+				<div class="aia-kpi aia-kpi-purple"><div class="aia-kpi-label">MTD Sales</div><div class="aia-kpi-value" id="aia-kpi-sales">—</div><div class="aia-kpi-sub" id="aia-kpi-sales-sub">Loading...</div></div>
 			</div>
 			<div id="aia-cash-cover" class="aia-cash-cover-wrap"></div>
 			<div class="aia-panel-grid">
@@ -823,31 +778,11 @@ function getDashboardHTML() { return `
 			</div>
 		</div>
 
-		<!-- RECEIVABLES -->
-		<div class="aia-view" id="aia-view-receivables">
-			<div class="aia-view-header">💰 Customer Receivables</div>
-			<div id="aia-receivables-body"><div class="aia-empty-row">Loading...</div></div>
-		</div>
+		<div class="aia-view" id="aia-view-receivables"><div class="aia-view-header">💰 Customer Receivables</div><div id="aia-receivables-body"><div class="aia-empty-row">Loading...</div></div></div>
+		<div class="aia-view" id="aia-view-payables"><div class="aia-view-header">🧾 Supplier Payables</div><div id="aia-payables-body"><div class="aia-empty-row">Loading...</div></div></div>
+		<div class="aia-view" id="aia-view-inventory"><div class="aia-view-header">📦 Inventory Intelligence <span class="aia-badge aia-badge-orange" id="aia-stock-count" style="font-size:12px;margin-left:8px">—</span></div><div id="aia-inventory-body"><div class="aia-empty-row">Loading...</div></div></div>
+		<div class="aia-view" id="aia-view-sales"><div class="aia-view-header">📈 Sales Report</div><div id="aia-sales-body"><div class="aia-empty-row">Loading...</div></div></div>
 
-		<!-- PAYABLES -->
-		<div class="aia-view" id="aia-view-payables">
-			<div class="aia-view-header">🧾 Supplier Payables</div>
-			<div id="aia-payables-body"><div class="aia-empty-row">Loading...</div></div>
-		</div>
-
-		<!-- INVENTORY -->
-		<div class="aia-view" id="aia-view-inventory">
-			<div class="aia-view-header">📦 Inventory Intelligence <span class="aia-badge aia-badge-orange" id="aia-stock-count" style="font-size:12px;margin-left:8px">—</span></div>
-			<div id="aia-inventory-body"><div class="aia-empty-row">Loading...</div></div>
-		</div>
-
-		<!-- SALES REPORT -->
-		<div class="aia-view" id="aia-view-sales">
-			<div class="aia-view-header">📈 Sales Report</div>
-			<div id="aia-sales-body"><div class="aia-empty-row">Loading...</div></div>
-		</div>
-
-		<!-- AI ADVISOR -->
 		<div class="aia-view" id="aia-view-advisor">
 			<div class="aia-view-header">🤖 AI Business Advisor</div>
 			<div class="aia-panel aia-chat-panel">
@@ -866,20 +801,20 @@ function getDashboardHTML() { return `
 				</div>
 				<div class="aia-chat-input-row">
 					<input class="aia-chat-input" id="aia-chat-input" placeholder="Ask about customers, payments, stock, sales..." />
-					<button class="aia-send-btn" id="aia-send-btn" onclick="sendChatMsg()">↑</button>
+					<button class="aia-send-btn" id="aia-send-btn">↑</button>
 				</div>
 			</div>
 		</div>
-
 	</div>
-</div>`; }
+</div>`;
+	}
 
-// ─── STYLES ───────────────────────────────────────────────────────────────────
-function injectStyles() {
-	if (document.getElementById('aia-styles')) return;
-	const s = document.createElement('style');
-	s.id = 'aia-styles';
-	s.textContent = `
+	// ─── STYLES ───────────────────────────────────────────────────────────────────
+	function injectStyles() {
+		if (document.getElementById('aia-styles')) return;
+		const s = document.createElement('style');
+		s.id = 'aia-styles';
+		s.textContent = `
 	.aia-wrap{display:flex;height:calc(100vh - 110px);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;color:var(--text-color);}
 	.aia-sidebar{width:220px;min-width:220px;border-right:1px solid var(--border-color);display:flex;flex-direction:column;background:var(--card-bg);padding-bottom:16px;overflow-y:auto;}
 	.aia-brand{display:flex;align-items:center;gap:10px;padding:16px 14px;border-bottom:1px solid var(--border-color);}
@@ -981,5 +916,7 @@ function injectStyles() {
 	@media(max-width:1200px){.aia-kpi-grid{grid-template-columns:repeat(3,1fr);}.aia-sales-grid{grid-template-columns:1fr;}}
 	@media(max-width:900px){.aia-kpi-grid{grid-template-columns:repeat(2,1fr);}.aia-panel-grid{grid-template-columns:1fr;}}
 	`;
-	document.head.appendChild(s);
-}
+		document.head.appendChild(s);
+	}
+
+})(); // ← closes the IIFE — nothing above escapes to global scope
